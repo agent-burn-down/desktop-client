@@ -31,5 +31,6 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 	}
 	root.SetVersionTemplate("burndown-cli {{.Version}}\n")
+	root.AddCommand(newServeCmd())
 	return root
 }

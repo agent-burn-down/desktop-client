@@ -70,6 +70,12 @@ func WithHTTPClient(h *http.Client) Option {
 	return func(c *Client) { c.httpClient = h }
 }
 
+// WithSleep overrides the backoff sleep between retry attempts. Tests inject a
+// no-op to avoid real delays; production uses time.Sleep.
+func WithSleep(f func(time.Duration)) Option {
+	return func(c *Client) { c.sleep = f }
+}
+
 // NewClient returns a Client for the given base URL and collector key. The
 // underlying HTTP client uses a 10s timeout unless overridden.
 func NewClient(baseURL, collectorKey string, opts ...Option) *Client {
