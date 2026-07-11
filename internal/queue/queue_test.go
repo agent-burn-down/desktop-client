@@ -192,3 +192,31 @@ func idsOf(items []Item) []int64 {
 	}
 	return ids
 }
+
+func TestEvictionSacrificesAckedFirst(t *testing.T) {
+	// 300 acked + 400 pending = 700 rows over a 600 cap. One evict round
+	// removes evictChunk (512) victims; every acked row must be among them
+	// before any pending row is touched.
+	q := openTemp(t, Options{MaxRows: 600})
+	if err := q.Enqueue(sampleEvents(300)); err != nil {
+		t.Fatal(err)
+	}
+	items, err := q.LeaseBatch(300, time.Minute)
+	if err != nil || len(items) != 300 {
+		t.Fatalf("leased %d (%v), want 300", len(items), err)
+	}
+	if err := q.Ack(idsOf(items)); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Enqueue(sampleEvents(400)); err != nil {
+		t.Fatal(err)
+	}
+	acked, _ := q.scalar("SELECT COUNT(*) FROM queue WHERE state='acked'")
+	if acked != 0 {
+		t.Fatalf("%d acked rows survived eviction; delivered history must go first", acked)
+	}
+	depth, _ := q.Depth()
+	if depth == 0 {
+		t.Fatal("all pending rows evicted; undelivered backlog must outlive acked history")
+	}
+}
