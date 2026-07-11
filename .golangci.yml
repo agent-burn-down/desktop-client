@@ -1,0 +1,32 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - gocyclo
+    - gosec
+    - lll
+    - misspell
+    - nilerr
+    - prealloc
+    - unconvert
+    - unparam
+  settings:
+    gocyclo:
+      min-complexity: 8
+    lll:
+      line-length: 100
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+          - lll
+          - gocyclo
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
