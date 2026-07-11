@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/agent-burn-down/desktop-client/internal/api"
 )
@@ -281,5 +282,32 @@ func assertFloat(t *testing.T, field string, got *float64, want float64) {
 	t.Helper()
 	if got == nil || *got != want {
 		t.Fatalf("%s = %v, want %v", field, got, want)
+	}
+}
+
+func TestErrorMessageTruncated(t *testing.T) {
+	long := strings.Repeat("x", maxErrorMessageLen-1) + "ééé"
+	payload := map[string]any{
+		"resourceLogs": []any{map[string]any{
+			"scopeLogs": []any{map[string]any{
+				"logRecords": []any{map[string]any{
+					"attributes": []any{
+						attr("event.name", "stringValue", "api_error"),
+						attr("error", "stringValue", long),
+					},
+				}},
+			}},
+		}},
+	}
+	events, _ := NormalizeLogBatch(payload, "")
+	if len(events) != 1 || events[0].ErrorMessage == nil {
+		t.Fatalf("want 1 event with error_message, got %+v", events)
+	}
+	got := *events[0].ErrorMessage
+	if len(got) > maxErrorMessageLen {
+		t.Fatalf("error_message length %d exceeds cap %d", len(got), maxErrorMessageLen)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatal("truncation broke UTF-8 validity")
 	}
 }

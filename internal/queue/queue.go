@@ -325,9 +325,9 @@ func (q *Queue) Check() error {
 	return nil
 }
 
-// evictIfNeeded drops oldest un-acked rows first (mirroring the reference
-// deque's overflow) until both the row and byte caps are satisfied. Callers
-// must hold q.mu.
+// evictIfNeeded drops rows until both the row and byte caps are satisfied:
+// acked (already-delivered) history first, then the oldest un-acked rows
+// (mirroring the reference deque's overflow). Callers must hold q.mu.
 func (q *Queue) evictIfNeeded() error {
 	for {
 		over, rows, err := q.overCap()
@@ -383,9 +383,11 @@ func evictTarget(rows, maxRows int64) int64 {
 }
 
 func (q *Queue) deleteVictims(n int64) (int64, error) {
+	// Acked rows are delivered history retained only for local stats, so they
+	// are sacrificed first; undelivered rows go oldest-first only after that.
 	res, err := q.db.Exec(
 		`DELETE FROM queue WHERE id IN (
-			SELECT id FROM queue ORDER BY (state='acked') ASC, id ASC LIMIT ?)`, n)
+			SELECT id FROM queue ORDER BY (state='acked') DESC, id ASC LIMIT ?)`, n)
 	if err != nil {
 		return 0, fmt.Errorf("evict rows: %w", err)
 	}

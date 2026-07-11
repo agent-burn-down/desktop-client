@@ -3,6 +3,7 @@ package normalize
 import (
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/agent-burn-down/desktop-client/internal/api"
 )
@@ -67,7 +68,7 @@ func flattenLogRecord(record any, repo string) *api.NormalizedEvent {
 		CacheReadTokens:   intOrNil(pyOr(cacheReadAliases(attrs)...)),
 		CacheCreateTokens: intOrNil(attrs["cache_creation_tokens"]),
 		Repo:              asString(pyOr(repo, attrs["repo"], attrs["repository"])),
-		ErrorMessage:      asString(attrs["error"]),
+		ErrorMessage:      truncated(asString(attrs["error"])),
 	}
 }
 
@@ -111,6 +112,24 @@ func normalizeEventName(v any) *string {
 		return nil
 	}
 	return &s
+}
+
+// maxErrorMessageLen bounds the only free-text passthrough field so a
+// misbehaving agent cannot stuff megabytes of diagnostics (or accidental
+// prompt fragments) into an uploaded event.
+const maxErrorMessageLen = 2048
+
+// truncated caps a string pointer at maxErrorMessageLen bytes on a rune
+// boundary; nil passes through.
+func truncated(s *string) *string {
+	if s == nil || len(*s) <= maxErrorMessageLen {
+		return s
+	}
+	cut := (*s)[:maxErrorMessageLen]
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	return &cut
 }
 
 // asString returns a pointer to v when it is a non-empty string, else nil.
