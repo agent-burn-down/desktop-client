@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/agent-burn-down/desktop-client/internal/api"
 	"github.com/agent-burn-down/desktop-client/internal/config"
@@ -154,6 +155,51 @@ func TestCheckHeartbeat(t *testing.T) {
 	unreg := d.checkHeartbeat(context.Background(), &config.Config{APIURL: okSrv.URL}, nil)
 	if unreg.Status != Fail || unreg.Hint != loginHint {
 		t.Errorf("unregistered: %+v", unreg)
+	}
+}
+
+func TestCheckKeyExpiry(t *testing.T) {
+	future := func(d time.Duration) string { return time.Now().Add(d).Format(time.RFC3339) }
+	tests := []struct {
+		name string
+		cfg  *config.Config
+		err  error
+		want Status
+	}{
+		{"no config", &config.Config{}, os.ErrNotExist, Pass},
+		{"no key stored", &config.Config{}, nil, Pass},
+		{"never expires", &config.Config{CollectorKey: "k"}, nil, Pass},
+		{
+			"far from expiry",
+			&config.Config{CollectorKey: "k", KeyExpiresAt: future(60 * 24 * time.Hour)},
+			nil, Pass,
+		},
+		{
+			"within 14 days",
+			&config.Config{CollectorKey: "k", KeyExpiresAt: future(5 * 24 * time.Hour)},
+			nil, Warn,
+		},
+		{
+			"already expired",
+			&config.Config{CollectorKey: "k", KeyExpiresAt: future(-24 * time.Hour)},
+			nil, Fail,
+		},
+		{
+			"rotation failing",
+			&config.Config{CollectorKey: "k", KeyExpiresAt: future(60 * 24 * time.Hour), RotationFailures: 2},
+			nil, Warn,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := checkKeyExpiry(tc.cfg, tc.err)
+			if got.Status != tc.want {
+				t.Errorf("status = %s, want %s (%s)", got.Status, tc.want, got.Detail)
+			}
+			if got.Status != Pass && got.Hint == "" {
+				t.Error("non-pass key_expiry result missing hint")
+			}
+		})
 	}
 }
 

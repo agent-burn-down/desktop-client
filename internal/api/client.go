@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/agent-burn-down/desktop-client/internal/counters"
@@ -20,32 +21,67 @@ const httpTimeout = 10 * time.Second
 // number of attempts (4). Mirrors the Python forwarder's (1, 2, 4) schedule.
 var retryDelays = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
 
+// Standardized ingest auth-failure codes (see the backend's "Auth error
+// contract", docs/reference-implementation.md). Empty Code means a legacy
+// server that only sent {"detail": ...} with no code.
+const (
+	CodeKeyInvalid = "key_invalid"
+	CodeKeyRevoked = "key_revoked"
+	CodeKeyExpired = "key_expired"
+	CodeKeyRotated = "key_rotated"
+)
+
 // AuthError is returned when the backend rejects the collector key with HTTP
-// 401. It carries the server-provided detail string and is distinct from
-// transport errors, so callers can prompt the user to re-authenticate rather
-// than retry.
+// 401. It carries the standardized error Code (one of the Code* constants,
+// empty for a legacy server) plus a human-readable Detail, and is distinct
+// from transport errors so callers can react per-code rather than retry.
 type AuthError struct {
+	Code   string
 	Detail string
+}
+
+// ConflictError is returned for HTTP 409 responses: currently only
+// POST /ingest/v1/keys/rotate, when a rotation is already in progress within
+// its overlap window. Not retryable — callers should back off, not retry.
+type ConflictError struct {
+	Detail string
+}
+
+func (e *ConflictError) Error() string {
+	if e.Detail == "" {
+		return "conflict (409)"
+	}
+	return fmt.Sprintf("conflict (409): %s", e.Detail)
 }
 
 // Error implements the error interface.
 func (e *AuthError) Error() string {
-	if e.Detail == "" {
+	switch {
+	case e.Detail != "":
+		return fmt.Sprintf("authentication failed (401): %s", e.Detail)
+	case e.Code != "":
+		return fmt.Sprintf("authentication failed (401): %s", e.Code)
+	default:
 		return "authentication failed (401)"
 	}
-	return fmt.Sprintf("authentication failed (401): %s", e.Detail)
 }
 
 // RegisterOut is the response from POST /ingest/v1/register.
 type RegisterOut struct {
 	CollectorID int64  `json:"collector_id"`
 	Policy      Policy `json:"policy"`
+	// KeyExpiresAt is the collector key's expiry (nil for legacy/never-expiring
+	// keys). Populated so callers can schedule rotation before it lapses.
+	KeyExpiresAt *string `json:"key_expires_at"`
 }
 
 // HeartbeatOut is the response from POST /ingest/v1/heartbeat.
 type HeartbeatOut struct {
 	OK     bool   `json:"ok"`
 	Policy Policy `json:"policy"`
+	// KeyExpiresAt is the collector key's expiry (nil for legacy/never-expiring
+	// keys). Populated so callers can schedule rotation before it lapses.
+	KeyExpiresAt *string `json:"key_expires_at"`
 }
 
 // Counts is the accepted/dropped tally returned by POST /ingest/v1/events.
@@ -56,11 +92,13 @@ type Counts struct {
 
 // Client is a typed HTTP client for the backend ingest API.
 type Client struct {
-	baseURL      string
+	baseURL    string
+	userAgent  string
+	httpClient *http.Client
+	sleep      func(time.Duration)
+
+	keyMu        sync.Mutex
 	collectorKey string
-	userAgent    string
-	httpClient   *http.Client
-	sleep        func(time.Duration)
 }
 
 // Option configures a Client.
@@ -91,6 +129,22 @@ func NewClient(baseURL, collectorKey string, opts ...Option) *Client {
 		opt(c)
 	}
 	return c
+}
+
+// SetKey swaps the collector key used on subsequent requests. Safe to call
+// concurrently with in-flight requests (a request already past the header-set
+// step is unaffected; every new request picks up the change).
+func (c *Client) SetKey(key string) {
+	c.keyMu.Lock()
+	defer c.keyMu.Unlock()
+	c.collectorKey = key
+}
+
+// Key returns the collector key currently in use.
+func (c *Client) Key() string {
+	c.keyMu.Lock()
+	defer c.keyMu.Unlock()
+	return c.collectorKey
 }
 
 // Register registers (or re-registers) this collector and resolves its
@@ -151,12 +205,43 @@ func (c *Client) Health(ctx context.Context) error {
 	return c.doWithRetry(ctx, http.MethodGet, "/api/health", nil, false, nil)
 }
 
+// RotateOut is the response from POST /ingest/v1/keys/rotate.
+type RotateOut struct {
+	CollectorKey     string `json:"collector_key"`
+	KeyID            int64  `json:"key_id"`
+	KeyExpiresAt     string `json:"key_expires_at"`
+	OldKeyValidUntil string `json:"old_key_valid_until"`
+}
+
+// RotateKey rotates the collector key currently in use (POST
+// /ingest/v1/keys/rotate), authenticated with that key. The old key stays
+// valid until OldKeyValidUntil. A *ConflictError (409) means a rotation is
+// already in progress within its overlap window — callers should back off
+// rather than retry immediately.
+func (c *Client) RotateKey(ctx context.Context) (*RotateOut, error) {
+	var out RotateOut
+	if err := c.postJSON(ctx, "/ingest/v1/keys/rotate", map[string]any{}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (c *Client) postJSON(ctx context.Context, path string, body, out any) error {
+	return c.postJSONAuth(ctx, path, body, out, true)
+}
+
+// postJSONNoAuth is postJSON without the X-Collector-Key header, for the
+// unauthenticated device-authorization endpoints.
+func (c *Client) postJSONNoAuth(ctx context.Context, path string, body, out any) error {
+	return c.postJSONAuth(ctx, path, body, out, false)
+}
+
+func (c *Client) postJSONAuth(ctx context.Context, path string, body, out any, auth bool) error {
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("marshal request for %s: %w", path, err)
 	}
-	return c.doWithRetry(ctx, http.MethodPost, path, payload, true, out)
+	return c.doWithRetry(ctx, http.MethodPost, path, payload, auth, out)
 }
 
 // doWithRetry issues the request, retrying only on 5xx and network errors per
@@ -197,7 +282,7 @@ func (c *Client) doOnce(
 	}
 	req.Header.Set("User-Agent", c.userAgent)
 	if auth {
-		req.Header.Set("X-Collector-Key", c.collectorKey)
+		req.Header.Set("X-Collector-Key", c.Key())
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -215,7 +300,11 @@ func handleResponse(resp *http.Response, path string, out any) (bool, error) {
 	case resp.StatusCode == http.StatusOK:
 		return false, decodeJSON(resp.Body, out)
 	case resp.StatusCode == http.StatusUnauthorized:
-		return false, &AuthError{Detail: parseDetail(resp.Body)}
+		code, detail := parseAuthBody(resp.Body)
+		return false, &AuthError{Code: code, Detail: detail}
+	case resp.StatusCode == http.StatusConflict:
+		_, detail := parseAuthBody(resp.Body)
+		return false, &ConflictError{Detail: detail}
 	case resp.StatusCode >= 500:
 		return true, fmt.Errorf(
 			"%s: server error %d: %s", path, resp.StatusCode, readSnippet(resp.Body))
@@ -243,13 +332,17 @@ func decodeJSON(r io.Reader, out any) error {
 	return nil
 }
 
-func parseDetail(r io.Reader) string {
+// parseAuthBody reads a 401 body once and returns both the standardized error
+// code ({"error": "key_invalid"|...}) and, if present, the legacy human
+// detail string ({"detail": ...}). Either or both may be empty.
+func parseAuthBody(r io.Reader) (code, detail string) {
 	var body struct {
+		Error  string `json:"error"`
 		Detail string `json:"detail"`
 	}
 	data, _ := io.ReadAll(io.LimitReader(r, 4096))
 	_ = json.Unmarshal(data, &body)
-	return body.Detail
+	return body.Error, body.Detail
 }
 
 func readSnippet(r io.Reader) string {

@@ -98,6 +98,79 @@ func TestStatusDaemonUpJSON(t *testing.T) {
 	}
 }
 
+func TestStatusSurfacesRotationState(t *testing.T) {
+	t.Setenv(config.EnvConfigDir, t.TempDir())
+	store, _ := config.NewFileStore()
+	_ = store.Save(&config.Config{
+		APIURL: "https://x", CollectorKey: testKey, Machine: "laptop-1",
+		KeyExpiresAt: "2026-10-09T00:00:00Z", PendingKey: "abd_pending", RotationFailures: 2,
+	})
+	srv, _ := fakeReceiver()
+	defer srv.Close()
+
+	out, err := runCmd(t, "status", "--json", "--port", strconv.Itoa(serverPort(t, srv)))
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	var report statusReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatalf("decode status json: %v\n%s", err, out)
+	}
+	if report.KeyExpiresAt != "2026-10-09T00:00:00Z" {
+		t.Errorf("key_expires_at = %q", report.KeyExpiresAt)
+	}
+	if !report.RotationPending {
+		t.Error("rotation_pending should be true when a PendingKey is set")
+	}
+	if report.RotationFailures != 2 {
+		t.Errorf("rotation_failures = %d, want 2", report.RotationFailures)
+	}
+}
+
+func TestStatusTextShowsRotationFailureWarning(t *testing.T) {
+	t.Setenv(config.EnvConfigDir, t.TempDir())
+	store, _ := config.NewFileStore()
+	_ = store.Save(&config.Config{
+		APIURL: "https://x", CollectorKey: testKey, Machine: "laptop-1",
+		KeyExpiresAt: "2020-01-01T00:00:00Z", RotationFailures: 3,
+	})
+	srv, _ := fakeReceiver()
+	defer srv.Close()
+
+	out, err := runCmd(t, "status", "--port", strconv.Itoa(serverPort(t, srv)))
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if !strings.Contains(out, "EXPIRED") {
+		t.Errorf("expected EXPIRED for a past key_expires_at, got: %q", out)
+	}
+	if !strings.Contains(out, "rotation failing: 3") {
+		t.Errorf("expected a rotation-failure warning, got: %q", out)
+	}
+}
+
+func TestStatusShowsDegradedAuthReason(t *testing.T) {
+	t.Setenv(config.EnvConfigDir, t.TempDir())
+	store, _ := config.NewFileStore()
+	_ = store.Save(&config.Config{
+		APIURL: "https://x", CollectorKey: testKey, Machine: "laptop-1",
+		AuthReason: "key_revoked",
+	})
+	srv, _ := fakeReceiver()
+	defer srv.Close()
+
+	out, err := runCmd(t, "status", "--port", strconv.Itoa(serverPort(t, srv)))
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if !strings.Contains(out, "DEGRADED") || !strings.Contains(out, "key_revoked") {
+		t.Errorf("expected a DEGRADED/key_revoked line, got: %q", out)
+	}
+	if !strings.Contains(out, "burndown-cli login") {
+		t.Errorf("expected a login hint, got: %q", out)
+	}
+}
+
 func TestStatusDaemonDownText(t *testing.T) {
 	t.Setenv(config.EnvConfigDir, t.TempDir())
 	store, _ := config.NewFileStore()

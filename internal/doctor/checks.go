@@ -89,10 +89,44 @@ func (d *Doctor) checkHeartbeat(ctx context.Context, cfg *config.Config, cfgErr 
 	}
 	var authErr *api.AuthError
 	if errors.As(err, &authErr) {
-		return fail("heartbeat", "authentication rejected: "+authErr.Detail, loginHint)
+		reason := authErr.Code
+		if reason == "" {
+			reason = authErr.Detail
+		}
+		return fail("heartbeat", "authentication rejected: "+reason, loginHint)
 	}
 	return fail("heartbeat", "heartbeat failed: "+err.Error(),
 		"check api_url and network connectivity")
+}
+
+// checkKeyExpiry warns when the stored key is nearing expiry or when
+// automatic rotation (#17) has been failing, so the user can re-login before
+// either becomes an outage.
+func checkKeyExpiry(cfg *config.Config, cfgErr error) Result {
+	if cfgErr != nil || cfg.CollectorKey == "" {
+		return pass("key_expiry", "n/a (no key stored yet)")
+	}
+	if cfg.RotationFailures > 0 {
+		return warn("key_expiry",
+			fmt.Sprintf("automatic rotation has failed %d time(s) in a row", cfg.RotationFailures),
+			loginHint)
+	}
+	if cfg.KeyExpiresAt == "" {
+		return pass("key_expiry", "key does not expire")
+	}
+	expires, err := time.Parse(time.RFC3339, cfg.KeyExpiresAt)
+	if err != nil {
+		return pass("key_expiry", "key expiry unparseable: "+cfg.KeyExpiresAt)
+	}
+	days := int(time.Until(expires).Hours() / 24)
+	switch {
+	case days < 0:
+		return fail("key_expiry", "key has expired", loginHint)
+	case days < 14:
+		return warn("key_expiry", fmt.Sprintf("key expires in %dd", days), loginHint)
+	default:
+		return pass("key_expiry", fmt.Sprintf("expires in %dd", days))
+	}
 }
 
 // apiClient builds a client with a no-op retry sleep so probes fail fast.

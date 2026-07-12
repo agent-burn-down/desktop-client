@@ -78,8 +78,8 @@ func TestRunEveryNonPassHasHint(t *testing.T) {
 		HealthzURL: "http://127.0.0.1:65533/healthz",
 	})
 	results := d.Run(context.Background())
-	if len(results) != 8 {
-		t.Fatalf("expected 8 checks, got %d", len(results))
+	if len(results) != 9 {
+		t.Fatalf("expected 9 checks, got %d", len(results))
 	}
 	for _, r := range results {
 		if (r.Status == Warn || r.Status == Fail) && r.Hint == "" {

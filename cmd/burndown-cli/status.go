@@ -40,13 +40,18 @@ func newStatusCmd() *cobra.Command {
 // derived from the live /healthz snapshot via counters.Report, so `status
 // --json` and the heartbeat always report identical counter values.
 type statusReport struct {
-	DaemonUp    bool                `json:"daemon_up"`
-	APIURL      string              `json:"api_url"`
-	Machine     string              `json:"machine"`
-	KeyPrefix   string              `json:"key_prefix"`
-	CollectorID int64               `json:"collector_id"`
-	Counters    map[string]int64    `json:"counters,omitempty"`
-	Telemetry   *counters.Telemetry `json:"telemetry,omitempty"`
+	DaemonUp         bool                `json:"daemon_up"`
+	APIURL           string              `json:"api_url"`
+	Machine          string              `json:"machine"`
+	KeyPrefix        string              `json:"key_prefix"`
+	CollectorID      int64               `json:"collector_id"`
+	KeyExpiresAt     string              `json:"key_expires_at,omitempty"`
+	RotationPending  bool                `json:"rotation_pending,omitempty"`
+	RotationFailures int                 `json:"rotation_failures,omitempty"`
+	LastRotationAt   string              `json:"last_rotation_at,omitempty"`
+	AuthReason       string              `json:"auth_reason,omitempty"`
+	Counters         map[string]int64    `json:"counters,omitempty"`
+	Telemetry        *counters.Telemetry `json:"telemetry,omitempty"`
 }
 
 func runStatus(cmd *cobra.Command, port int, asJSON bool) error {
@@ -56,6 +61,11 @@ func runStatus(cmd *cobra.Command, port int, asJSON bool) error {
 		report.Machine = cfg.Machine
 		report.KeyPrefix = keyPrefix(cfg.CollectorKey)
 		report.CollectorID = cfg.CollectorID
+		report.KeyExpiresAt = cfg.KeyExpiresAt
+		report.RotationPending = cfg.PendingKey != ""
+		report.RotationFailures = cfg.RotationFailures
+		report.LastRotationAt = cfg.LastRotationAt
+		report.AuthReason = cfg.AuthReason
 	}
 	if hz, err := probeHealthz(cmd.Context(), port); err == nil {
 		report.DaemonUp = true
@@ -100,6 +110,12 @@ func writeTextReport(w io.Writer, report statusReport) {
 	outf(w, "machine:      %s\n", orDash(report.Machine))
 	outf(w, "key:          %s\n", keyDisplay(report.KeyPrefix))
 	outf(w, "collector_id: %s\n", idDisplay(report.CollectorID))
+	if report.KeyPrefix != "" {
+		outf(w, "key_expiry:   %s\n", rotationDisplay(report))
+	}
+	if report.AuthReason != "" {
+		outf(w, "auth:         DEGRADED (%s) — run `burndown-cli login`\n", report.AuthReason)
+	}
 	if report.DaemonUp {
 		writeCounters(w, report.Counters)
 	}
@@ -134,6 +150,38 @@ func idDisplay(id int64) string {
 		return "-"
 	}
 	return fmt.Sprintf("%d", id)
+}
+
+// rotationDisplay summarizes key expiry and rotation health for status text.
+func rotationDisplay(report statusReport) string {
+	base := "never expires"
+	if report.KeyExpiresAt != "" {
+		base = expiryDisplay(report.KeyExpiresAt)
+	}
+	if report.RotationPending {
+		base += " (rotation pending verification)"
+	}
+	if report.RotationFailures > 0 {
+		base += fmt.Sprintf(" (rotation failing: %d attempt(s), run `burndown-cli login`"+
+			" if this continues)", report.RotationFailures)
+	}
+	return base
+}
+
+func expiryDisplay(iso string) string {
+	expires, err := time.Parse(time.RFC3339, iso)
+	if err != nil {
+		return iso
+	}
+	remaining := time.Until(expires)
+	if remaining <= 0 {
+		return "EXPIRED"
+	}
+	days := int(remaining.Hours() / 24)
+	if days < 1 {
+		return "expires in <1d"
+	}
+	return fmt.Sprintf("expires in %dd", days)
 }
 
 func unixDisplay(sec int64) string {

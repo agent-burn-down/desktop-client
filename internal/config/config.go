@@ -23,14 +23,22 @@ const (
 // knownFields lists the JSON keys represented by typed Config fields. Any other
 // key found on load is preserved in Config.extra across a save round-trip.
 var knownFields = map[string]struct{}{
-	"api_url":        {},
-	"collector_key":  {},
-	"collector_id":   {},
-	"user_email":     {},
-	"machine":        {},
-	"policy":         {},
-	"key_expires_at": {},
-	"retention_days": {},
+	"api_url":                {},
+	"collector_key":          {},
+	"collector_id":           {},
+	"user_email":             {},
+	"machine":                {},
+	"policy":                 {},
+	"key_expires_at":         {},
+	"retention_days":         {},
+	"key_id":                 {},
+	"pending_key":            {},
+	"pending_key_id":         {},
+	"pending_key_expires_at": {},
+	"old_key_valid_until":    {},
+	"last_rotation_at":       {},
+	"rotation_failures":      {},
+	"auth_reason":            {},
 }
 
 const (
@@ -53,11 +61,38 @@ type Config struct {
 	UserEmail    string     `json:"user_email"`
 	Machine      string     `json:"machine"`
 	Policy       api.Policy `json:"policy"`
-	// KeyExpiresAt is reserved for M2 key rotation; unused today.
+	// KeyExpiresAt is the current collector key's expiry (empty = never/legacy
+	// key, no expiry). Drives the T-7-day rotation trigger.
 	KeyExpiresAt string `json:"key_expires_at"`
 	// RetentionDays bounds how long acked queue rows are kept for local stats.
 	// Zero or negative means use DefaultRetentionDays; read via Retention.
 	RetentionDays int `json:"retention_days"`
+
+	// KeyID is the id of the currently active collector key.
+	KeyID int64 `json:"key_id,omitempty"`
+	// PendingKey, if set, is a rotated-to key awaiting a successful heartbeat
+	// verification before it replaces CollectorKey. Its presence on load means
+	// a rotation was in progress when the process last stopped, so the
+	// uploader resumes verification rather than starting a new rotation.
+	PendingKey string `json:"pending_key,omitempty"`
+	// PendingKeyID is the id of PendingKey.
+	PendingKeyID int64 `json:"pending_key_id,omitempty"`
+	// PendingKeyExpires is PendingKey's expiry, applied to KeyExpiresAt once
+	// PendingKey is committed.
+	PendingKeyExpires string `json:"pending_key_expires_at,omitempty"`
+	// OldKeyValidUntil is the overlap deadline the backend gave for the key
+	// being rotated away from (informational; the backend enforces it).
+	OldKeyValidUntil string `json:"old_key_valid_until,omitempty"`
+	// LastRotationAt is when a rotation last completed or was last attempted,
+	// gating the server's one-rotation-per-day limit.
+	LastRotationAt string `json:"last_rotation_at,omitempty"`
+	// RotationFailures counts consecutive failed rotation attempts, surfaced
+	// as an escalating warning in status/doctor.
+	RotationFailures int `json:"rotation_failures,omitempty"`
+	// AuthReason is the last standardized 401 code that put uploads in
+	// Degraded mode (key_revoked/key_invalid); empty while Active. Persisted
+	// so status/doctor are accurate even when the daemon is not running.
+	AuthReason string `json:"auth_reason,omitempty"`
 
 	// extra holds JSON fields not represented by the typed fields above, so
 	// they survive a load/save round-trip.
