@@ -192,11 +192,21 @@ func (c *Client) Health(ctx context.Context) error {
 }
 
 func (c *Client) postJSON(ctx context.Context, path string, body, out any) error {
+	return c.postJSONAuth(ctx, path, body, out, true)
+}
+
+// postJSONNoAuth is postJSON without the X-Collector-Key header, for the
+// unauthenticated device-authorization endpoints.
+func (c *Client) postJSONNoAuth(ctx context.Context, path string, body, out any) error {
+	return c.postJSONAuth(ctx, path, body, out, false)
+}
+
+func (c *Client) postJSONAuth(ctx context.Context, path string, body, out any, auth bool) error {
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("marshal request for %s: %w", path, err)
 	}
-	return c.doWithRetry(ctx, http.MethodPost, path, payload, true, out)
+	return c.doWithRetry(ctx, http.MethodPost, path, payload, auth, out)
 }
 
 // doWithRetry issues the request, retrying only on 5xx and network errors per
