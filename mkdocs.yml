@@ -1,0 +1,40 @@
+site_name: burndown-cli
+site_description: Local telemetry collector for coding agents (Claude Code, Codex)
+repo_url: https://github.com/agent-burn-down/desktop-client
+repo_name: agent-burn-down/desktop-client
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - content.code.copy
+
+plugins:
+  - search
+  - mermaid2
+
+markdown_extensions:
+  - admonition
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:mermaid2.fence_mermaid_custom
+
+nav:
+  - Home: index.md
+  - Quickstart: quickstart.md
+  - Privacy: privacy.md
+  - Architecture: architecture.md
+  - Troubleshooting: troubleshooting.md

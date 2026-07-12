@@ -1,5 +1,6 @@
 bin/
 dist/
+site/
 *.test
 coverage.out
 .DS_Store
