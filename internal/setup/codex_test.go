@@ -5,7 +5,32 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/BurntSushi/toml"
 )
+
+// assertValidTOML parses text and fails if it is not valid TOML, returning the
+// decoded document for further assertions.
+func assertValidTOML(t *testing.T, text string) map[string]any {
+	t.Helper()
+	var doc map[string]any
+	if _, err := toml.Decode(text, &doc); err != nil {
+		t.Fatalf("result is not valid TOML: %v\n---\n%s", err, text)
+	}
+	return doc
+}
+
+// countKeyLines counts top-level "key =" assignments in text (naive, for
+// duplicate detection in tests).
+func countKeyLines(text, key string) int {
+	n := 0
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), key+" =") {
+			n++
+		}
+	}
+	return n
+}
 
 func TestPlanCodexFreshCreatesTable(t *testing.T) {
 	dir := t.TempDir()
@@ -249,5 +274,144 @@ func TestEnsureTableKeyIdempotent(t *testing.T) {
 	}
 	if _, added := ensureTableKey(text, "otel", "environment", `"control-center"`); added {
 		t.Error("second insert should be a no-op")
+	}
+}
+
+// applyCodex is a test helper: plan and apply for a temp Codex dir, returning
+// the resulting config.toml contents.
+func applyCodex(t *testing.T, dir string) string {
+	t.Helper()
+	t.Setenv(EnvCodexDir, dir)
+	plan, err := PlanCodex(8765)
+	if err != nil {
+		t.Fatalf("PlanCodex: %v", err)
+	}
+	if _, err := plan.Apply(); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	return readFile(t, filepath.Join(dir, "config.toml"))
+}
+
+func TestPlanCodexMultiLineArrayNotCorrupted(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	// The exact CRITICAL repro: nested multi-line arrays, then a real key below.
+	existing := "[otel]\n" +
+		"weird_array = [\n" +
+		"  [1, 2],\n" +
+		"  [3, 4]\n" +
+		"]\n" +
+		"metrics_exporter = \"otlp\"\n"
+	if err := os.WriteFile(path, []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := applyCodex(t, dir)
+
+	doc := assertValidTOML(t, got)
+	otel, _ := doc["otel"].(map[string]any)
+	if otel["metrics_exporter"] != "otlp" {
+		t.Errorf("user metrics_exporter changed to %v, want \"otlp\"", otel["metrics_exporter"])
+	}
+	if n := countKeyLines(got, "metrics_exporter"); n != 1 {
+		t.Errorf("metrics_exporter appears %d times, want 1 (no duplicate)\n%s", n, got)
+	}
+	if otel["environment"] != "control-center" {
+		t.Errorf("environment not inserted correctly: %v", otel["environment"])
+	}
+	if !strings.Contains(got, "weird_array") || otel["weird_array"] == nil {
+		t.Errorf("user array lost:\n%s", got)
+	}
+
+	// Second run must be a byte-identical no-op.
+	plan2, err := PlanCodex(8765)
+	if err != nil {
+		t.Fatalf("second PlanCodex: %v", err)
+	}
+	if !plan2.Empty() {
+		t.Errorf("second run not a no-op: %v", plan2.Descriptions())
+	}
+	if plan2.text != got {
+		t.Errorf("second-run text differs from applied file:\n--- got ---\n%s\n--- want ---\n%s",
+			plan2.text, got)
+	}
+}
+
+func TestPlanCodexMultiLineInlineTablePreserved(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	// A multi-line inline table inside [otel]; a real key sits after it.
+	existing := "[otel]\n" +
+		"nested = {\n" +
+		"  a = 1,\n" +
+		"  b = 2\n" +
+		"}\n" +
+		"trace_exporter = \"otlp\"\n"
+	if err := os.WriteFile(path, []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := applyCodex(t, dir)
+
+	doc := assertValidTOML(t, got)
+	otel, _ := doc["otel"].(map[string]any)
+	if otel["trace_exporter"] != "otlp" {
+		t.Errorf("user trace_exporter changed to %v, want \"otlp\"", otel["trace_exporter"])
+	}
+	if n := countKeyLines(got, "trace_exporter"); n != 1 {
+		t.Errorf("trace_exporter appears %d times, want 1\n%s", n, got)
+	}
+}
+
+func TestPlanCodexBracketInStringValue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	// A '[' inside a quoted string must not open a bracket depth, and the
+	// following keys must still be seen as top-level.
+	existing := "[otel]\n" +
+		"note = \"contains a [ bracket and a { brace\"\n" +
+		"metrics_exporter = \"otlp\"\n"
+	if err := os.WriteFile(path, []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := applyCodex(t, dir)
+
+	doc := assertValidTOML(t, got)
+	otel, _ := doc["otel"].(map[string]any)
+	if otel["metrics_exporter"] != "otlp" {
+		t.Errorf("user metrics_exporter changed: %v", otel["metrics_exporter"])
+	}
+	if n := countKeyLines(got, "metrics_exporter"); n != 1 {
+		t.Errorf("metrics_exporter duplicated: %d\n%s", n, got)
+	}
+}
+
+func TestPlanCodexRemovesStaleTableRegardlessOfQuoting(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	// The stale nested table is written with a quoted last segment and odd
+	// spacing; header normalization must still match and remove it.
+	existing := "[otel]\n" +
+		"environment = \"control-center\"\n" +
+		"metrics_exporter = \"none\"\n" +
+		"trace_exporter = \"none\"\n" +
+		"log_user_prompt = false\n" +
+		"\n[ otel.exporter.\"otlp-http\" ]\n" +
+		"endpoint = \"http://127.0.0.1:1/v1/logs\"\n"
+	if err := os.WriteFile(path, []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := applyCodex(t, dir)
+
+	assertValidTOML(t, got)
+	if strings.Contains(got, "otlp-http\" ]") || strings.Contains(got, "[ otel.exporter") {
+		t.Errorf("stale nested table (odd quoting/spacing) not removed:\n%s", got)
+	}
+}
+
+func TestValidateCodexTOMLRejectsDuplicateKeys(t *testing.T) {
+	if err := validateCodexTOML("[otel]\nx = 1\nx = 2\n"); err == nil {
+		t.Error("expected duplicate-key rejection")
+	}
+	if err := validateCodexTOML("[otel]\nx = 1\n"); err != nil {
+		t.Errorf("valid TOML rejected: %v", err)
 	}
 }
