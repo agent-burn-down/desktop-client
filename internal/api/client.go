@@ -40,6 +40,20 @@ type AuthError struct {
 	Detail string
 }
 
+// ConflictError is returned for HTTP 409 responses: currently only
+// POST /ingest/v1/keys/rotate, when a rotation is already in progress within
+// its overlap window. Not retryable — callers should back off, not retry.
+type ConflictError struct {
+	Detail string
+}
+
+func (e *ConflictError) Error() string {
+	if e.Detail == "" {
+		return "conflict (409)"
+	}
+	return fmt.Sprintf("conflict (409): %s", e.Detail)
+}
+
 // Error implements the error interface.
 func (e *AuthError) Error() string {
 	switch {
@@ -191,6 +205,27 @@ func (c *Client) Health(ctx context.Context) error {
 	return c.doWithRetry(ctx, http.MethodGet, "/api/health", nil, false, nil)
 }
 
+// RotateOut is the response from POST /ingest/v1/keys/rotate.
+type RotateOut struct {
+	CollectorKey     string `json:"collector_key"`
+	KeyID            int64  `json:"key_id"`
+	KeyExpiresAt     string `json:"key_expires_at"`
+	OldKeyValidUntil string `json:"old_key_valid_until"`
+}
+
+// RotateKey rotates the collector key currently in use (POST
+// /ingest/v1/keys/rotate), authenticated with that key. The old key stays
+// valid until OldKeyValidUntil. A *ConflictError (409) means a rotation is
+// already in progress within its overlap window — callers should back off
+// rather than retry immediately.
+func (c *Client) RotateKey(ctx context.Context) (*RotateOut, error) {
+	var out RotateOut
+	if err := c.postJSON(ctx, "/ingest/v1/keys/rotate", map[string]any{}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (c *Client) postJSON(ctx context.Context, path string, body, out any) error {
 	return c.postJSONAuth(ctx, path, body, out, true)
 }
@@ -267,6 +302,9 @@ func handleResponse(resp *http.Response, path string, out any) (bool, error) {
 	case resp.StatusCode == http.StatusUnauthorized:
 		code, detail := parseAuthBody(resp.Body)
 		return false, &AuthError{Code: code, Detail: detail}
+	case resp.StatusCode == http.StatusConflict:
+		_, detail := parseAuthBody(resp.Body)
+		return false, &ConflictError{Detail: detail}
 	case resp.StatusCode >= 500:
 		return true, fmt.Errorf(
 			"%s: server error %d: %s", path, resp.StatusCode, readSnippet(resp.Body))

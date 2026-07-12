@@ -34,6 +34,29 @@ type mockBackend struct {
 	// lastHeartbeat is the raw JSON body of the most recent heartbeat request,
 	// so tests can assert the optional self-telemetry counters it carries.
 	lastHeartbeat map[string]json.RawMessage
+
+	// Rotation support. acceptedKeys nil means accept any key on
+	// heartbeat/events (existing behavior); non-nil restricts to that set, so
+	// tests can simulate an old key still valid during the overlap window vs.
+	// rejected after it, and a pending key not yet accepted.
+	acceptedKeys map[string]bool
+	keyExpiresAt *string
+	rotateOut    *api.RotateOut
+	rotateStatus int // 0 = 200 with rotateOut; else write this status verbatim
+	rotateCalls  int
+	// transientFailKey, if non-empty, makes heartbeat return 500 (not 401) for
+	// that specific key, simulating a network/server hiccup during
+	// verification rather than an auth rejection.
+	transientFailKey string
+}
+
+// acceptsKey reports whether r's X-Collector-Key is acceptable, per
+// mockBackend.acceptedKeys.
+func acceptsKey(accepted map[string]bool, r *http.Request) bool {
+	if accepted == nil {
+		return true
+	}
+	return accepted[r.Header.Get("X-Collector-Key")]
 }
 
 func newMockBackend() *mockBackend {
@@ -48,6 +71,7 @@ func (m *mockBackend) server(t *testing.T) *httptest.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ingest/v1/heartbeat", m.handleHeartbeat)
 	mux.HandleFunc("/ingest/v1/events", m.handleEvents)
+	mux.HandleFunc("/ingest/v1/keys/rotate", m.handleRotate)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
@@ -59,18 +83,22 @@ func (m *mockBackend) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	var body map[string]json.RawMessage
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	m.lastHeartbeat = body
-	if m.heartbeatFail {
+	if m.transientFailKey != "" && r.Header.Get("X-Collector-Key") == m.transientFailKey {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	if m.heartbeatFail || !acceptsKey(m.acceptedKeys, r) {
 		writeErr(w, http.StatusUnauthorized, "collector key revoked")
 		return
 	}
-	_ = json.NewEncoder(w).Encode(api.HeartbeatOut{OK: true, Policy: m.policy})
+	_ = json.NewEncoder(w).Encode(api.HeartbeatOut{OK: true, Policy: m.policy, KeyExpiresAt: m.keyExpiresAt})
 }
 
 func (m *mockBackend) handleEvents(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.eventPosts++
-	if m.eventsAuthFail {
+	if m.eventsAuthFail || !acceptsKey(m.acceptedKeys, r) {
 		writeErr(w, http.StatusUnauthorized, "invalid collector key")
 		return
 	}
@@ -88,6 +116,26 @@ func (m *mockBackend) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_ = json.NewEncoder(w).Encode(api.Counts{Accepted: len(req.Events)})
+}
+
+func (m *mockBackend) handleRotate(w http.ResponseWriter, r *http.Request) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rotateCalls++
+	if !acceptsKey(m.acceptedKeys, r) {
+		writeErr(w, http.StatusUnauthorized, "invalid collector key")
+		return
+	}
+	if m.rotateStatus == http.StatusConflict {
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "key already rotated"})
+		return
+	}
+	if m.rotateStatus != 0 {
+		w.WriteHeader(m.rotateStatus)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(m.rotateOut)
 }
 
 func writeErr(w http.ResponseWriter, code int, detail string) {
@@ -323,6 +371,237 @@ func (m *memStore) Save(c *config.Config) error {
 	cp := *c
 	m.saved = &cp
 	return nil
+}
+
+// testRotationNow is the fixed "current time" every rotation test anchors to,
+// so cases can express expiry/last-attempt timestamps as offsets from it.
+func testRotationNow(t *testing.T) time.Time {
+	t.Helper()
+	tm, err := time.Parse(time.RFC3339, "2026-01-01T00:00:00Z")
+	if err != nil {
+		t.Fatalf("parse fixed test time: %v", err)
+	}
+	return tm
+}
+
+// TestRotationDueGating unit-tests the T-7-day trigger and the once/day gate
+// without needing a client or store.
+func TestRotationDueGating(t *testing.T) {
+	up := &Uploader{now: func() time.Time { return testRotationNow(t) }}
+	cases := []struct {
+		name string
+		cfg  config.Config
+		want bool
+	}{
+		{"far out", config.Config{KeyExpiresAt: "2026-06-01T00:00:00Z"}, false},
+		{"never expires (empty)", config.Config{}, false},
+		{"within lead time, never attempted", config.Config{KeyExpiresAt: "2026-01-05T00:00:00Z"}, true},
+		{
+			"within lead time, attempted today",
+			config.Config{KeyExpiresAt: "2026-01-05T00:00:00Z", LastRotationAt: "2026-01-01T00:00:00Z"},
+			false,
+		},
+		{
+			"within lead time, last attempt over a day ago",
+			config.Config{KeyExpiresAt: "2026-01-05T00:00:00Z", LastRotationAt: "2025-12-30T00:00:00Z"},
+			true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := up.rotationDue(&tc.cfg); got != tc.want {
+				t.Errorf("rotationDue(%+v) = %v, want %v", tc.cfg, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRotationNearExpiryCommitsAndDrainsQueue proves the full happy path:
+// rotate -> pending persisted -> verify succeeds -> commit, with zero events
+// lost across the rotation.
+func TestRotationNearExpiryCommitsAndDrainsQueue(t *testing.T) {
+	mock := newMockBackend()
+	mock.acceptedKeys = map[string]bool{"yaahc_test": true}
+	const newExpiry = "2027-01-01T00:00:00Z"
+	mock.rotateOut = &api.RotateOut{
+		CollectorKey: "abd_newkey", KeyID: 99,
+		KeyExpiresAt: newExpiry, OldKeyValidUntil: "2026-01-02T00:00:00Z",
+	}
+	srv := mock.server(t)
+	up, q, _ := testDeps(t, mock, srv.URL)
+	store := newMemStore()
+	store.saved.CollectorKey = "yaahc_test"
+	store.saved.KeyExpiresAt = "2026-01-05T00:00:00Z" // within the 7d lead time
+	up.store = store
+	up.now = func() time.Time { return testRotationNow(t) }
+
+	_ = q.Enqueue(markedEvents(3))
+
+	// Cycle 1: rotate is attempted; the new key is persisted as pending, not
+	// yet live.
+	up.RotateCheckOnce(context.Background())
+	if mock.rotateCalls != 1 {
+		t.Fatalf("rotate calls = %d, want 1", mock.rotateCalls)
+	}
+	if store.saved.PendingKey != "abd_newkey" || store.saved.CollectorKey != "yaahc_test" {
+		t.Fatalf("expected pending=abd_newkey, current=yaahc_test; got %+v", store.saved)
+	}
+
+	// The backend now accepts the new key too (its overlap window).
+	mock.mu.Lock()
+	mock.acceptedKeys["abd_newkey"] = true
+	mock.mu.Unlock()
+
+	// Cycle 2: verification succeeds and commits.
+	up.RotateCheckOnce(context.Background())
+	if store.saved.CollectorKey != "abd_newkey" {
+		t.Fatalf("collector_key = %q, want abd_newkey", store.saved.CollectorKey)
+	}
+	if store.saved.PendingKey != "" {
+		t.Fatalf("pending key not cleared: %q", store.saved.PendingKey)
+	}
+	if store.saved.KeyExpiresAt != newExpiry {
+		t.Fatalf("key_expires_at = %q, want %q", store.saved.KeyExpiresAt, newExpiry)
+	}
+
+	// Zero event loss: the queue still drains cleanly after rotation.
+	up.FlushOnce(context.Background())
+	if d, _ := q.Depth(); d != 0 {
+		t.Fatalf("queue not drained after rotation: depth %d", d)
+	}
+	unique, dupes := mock.uniqueDelivered()
+	if unique != 3 || dupes != 0 {
+		t.Fatalf("delivered unique=%d dupes=%d, want 3/0", unique, dupes)
+	}
+}
+
+// TestRotationVerifyTransientFailureKeepsPending proves a network/server
+// hiccup during verification leaves the old key live and the pending key
+// retained for another attempt next cycle.
+func TestRotationVerifyTransientFailureKeepsPending(t *testing.T) {
+	mock := newMockBackend()
+	mock.acceptedKeys = map[string]bool{"yaahc_test": true}
+	mock.transientFailKey = "abd_newkey"
+	mock.rotateOut = &api.RotateOut{
+		CollectorKey: "abd_newkey", KeyID: 99,
+		KeyExpiresAt: "2027-01-01T00:00:00Z", OldKeyValidUntil: "2026-01-02T00:00:00Z",
+	}
+	srv := mock.server(t)
+	up, _, _ := testDeps(t, mock, srv.URL)
+	store := newMemStore()
+	store.saved.CollectorKey = "yaahc_test"
+	store.saved.KeyExpiresAt = "2026-01-05T00:00:00Z"
+	up.store = store
+	up.now = func() time.Time { return testRotationNow(t) }
+
+	up.RotateCheckOnce(context.Background()) // attemptRotate: persists pending
+	up.RotateCheckOnce(context.Background()) // verifyPendingKey: transient failure
+
+	if store.saved.PendingKey != "abd_newkey" {
+		t.Fatalf("pending key should be retained after a transient failure: %+v", store.saved)
+	}
+	if store.saved.CollectorKey != "yaahc_test" {
+		t.Fatalf("collector key should still be the old key: %+v", store.saved)
+	}
+	if got := up.client.Key(); got != "yaahc_test" {
+		t.Fatalf("live client key = %q, want reverted to yaahc_test", got)
+	}
+}
+
+// TestRotationVerifyRejectedDiscardsPending proves an actual auth rejection of
+// the pending key (not just a transient failure) discards it so the next
+// rotationDue check starts fresh, rather than retrying a dead key forever.
+func TestRotationVerifyRejectedDiscardsPending(t *testing.T) {
+	mock := newMockBackend()
+	mock.acceptedKeys = map[string]bool{"yaahc_test": true} // abd_bad is never accepted
+	mock.rotateOut = &api.RotateOut{
+		CollectorKey: "abd_bad", KeyID: 99,
+		KeyExpiresAt: "2027-01-01T00:00:00Z", OldKeyValidUntil: "2026-01-02T00:00:00Z",
+	}
+	srv := mock.server(t)
+	up, _, _ := testDeps(t, mock, srv.URL)
+	store := newMemStore()
+	store.saved.CollectorKey = "yaahc_test"
+	store.saved.KeyExpiresAt = "2026-01-05T00:00:00Z"
+	up.store = store
+	up.now = func() time.Time { return testRotationNow(t) }
+
+	up.RotateCheckOnce(context.Background())
+	up.RotateCheckOnce(context.Background())
+
+	if store.saved.PendingKey != "" {
+		t.Fatalf("pending key should be discarded after rejection: %+v", store.saved)
+	}
+	if store.saved.RotationFailures != 1 {
+		t.Fatalf("rotation_failures = %d, want 1", store.saved.RotationFailures)
+	}
+	if got := up.client.Key(); got != "yaahc_test" {
+		t.Fatalf("live client key = %q, want reverted to yaahc_test", got)
+	}
+}
+
+// TestRotationRestartResumesVerification proves a fresh Uploader instance
+// (simulating a restart) that never called RotateKey itself still resumes and
+// completes verification purely from PendingKey persisted in config.
+func TestRotationRestartResumesVerification(t *testing.T) {
+	mock := newMockBackend()
+	mock.acceptedKeys = map[string]bool{"yaahc_test": true, "abd_newkey": true}
+	srv := mock.server(t)
+
+	store := newMemStore()
+	store.saved.CollectorKey = "yaahc_test"
+	store.saved.KeyExpiresAt = "2026-01-05T00:00:00Z"
+	store.saved.PendingKey = "abd_newkey"
+	store.saved.PendingKeyID = 99
+	store.saved.PendingKeyExpires = "2027-01-01T00:00:00Z"
+	store.saved.OldKeyValidUntil = "2026-01-02T00:00:00Z"
+
+	up, _, _ := testDeps(t, mock, srv.URL)
+	up.store = store
+	up.now = func() time.Time { return testRotationNow(t) }
+
+	up.RotateCheckOnce(context.Background())
+
+	if mock.rotateCalls != 0 {
+		t.Fatalf("rotate should not be re-called when resuming from a pending key; calls = %d", mock.rotateCalls)
+	}
+	if store.saved.CollectorKey != "abd_newkey" {
+		t.Fatalf("collector_key = %q, want abd_newkey (resumed verification should commit)", store.saved.CollectorKey)
+	}
+	if store.saved.PendingKey != "" {
+		t.Fatalf("pending key not cleared: %q", store.saved.PendingKey)
+	}
+}
+
+// TestRotationConflictNoCrashNoKeyChange proves a 409 (another instance
+// already rotated) is handled gracefully: no panic, no key change, and it
+// does not count as a rotation failure (it isn't one).
+func TestRotationConflictNoCrashNoKeyChange(t *testing.T) {
+	mock := newMockBackend()
+	mock.acceptedKeys = map[string]bool{"yaahc_test": true}
+	mock.rotateStatus = http.StatusConflict
+	srv := mock.server(t)
+	up, _, _ := testDeps(t, mock, srv.URL)
+	store := newMemStore()
+	store.saved.CollectorKey = "yaahc_test"
+	store.saved.KeyExpiresAt = "2026-01-05T00:00:00Z"
+	up.store = store
+	up.now = func() time.Time { return testRotationNow(t) }
+
+	up.RotateCheckOnce(context.Background())
+
+	if store.saved.CollectorKey != "yaahc_test" {
+		t.Fatalf("collector key should be unchanged after a 409: %+v", store.saved)
+	}
+	if store.saved.PendingKey != "" {
+		t.Fatalf("pending key should not be set after a 409: %+v", store.saved)
+	}
+	if store.saved.RotationFailures != 0 {
+		t.Fatalf("rotation_failures should not increment on a 409 conflict: %d", store.saved.RotationFailures)
+	}
+	if store.saved.LastRotationAt == "" {
+		t.Fatal("last_rotation_at should be set even on conflict, to back off until tomorrow")
+	}
 }
 
 // TestHeartbeatCarriesSelfTelemetry proves the heartbeat request body includes

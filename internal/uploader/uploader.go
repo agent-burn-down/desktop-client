@@ -75,6 +75,7 @@ func New(cfg Config) *Uploader {
 // effect within one cycle without a restart.
 func (u *Uploader) Run(ctx context.Context) {
 	u.HeartbeatOnce(ctx)
+	u.RotateCheckOnce(ctx)
 	timer := time.NewTimer(u.flushDelay())
 	defer timer.Stop()
 	for {
@@ -83,6 +84,7 @@ func (u *Uploader) Run(ctx context.Context) {
 			return
 		case <-timer.C:
 			u.HeartbeatOnce(ctx)
+			u.RotateCheckOnce(ctx)
 			u.FlushOnce(ctx)
 			timer.Reset(u.flushDelay())
 		}
@@ -174,7 +176,7 @@ func (u *Uploader) HeartbeatOnce(ctx context.Context) {
 		u.logger.Info("heartbeat deferred: backend unreachable", "err", err)
 		return
 	}
-	u.onHeartbeatOK(out.Policy)
+	u.onHeartbeatOK(out.Policy, out.KeyExpiresAt)
 }
 
 // telemetry builds the self-telemetry snapshot sent with each heartbeat. It
@@ -189,7 +191,11 @@ func (u *Uploader) telemetry() counters.Telemetry {
 	return counters.Report(snap, version.Version)
 }
 
-func (u *Uploader) onHeartbeatOK(policy api.Policy) {
+// onHeartbeatOK swaps in the refreshed policy and, when present, the current
+// key's expiry (nil for a legacy server or a never-expiring key — left
+// untouched rather than cleared, since a legacy client that never sends
+// key_expires_at must not be misread as "just started expiring").
+func (u *Uploader) onHeartbeatOK(policy api.Policy, keyExpiresAt *string) {
 	u.mu.Lock()
 	u.policy = policy
 	u.authOK = true
@@ -197,7 +203,12 @@ func (u *Uploader) onHeartbeatOK(policy api.Policy) {
 	u.mu.Unlock()
 	u.counters.Set(counters.AuthFailed, 0)
 	u.counters.Set(counters.LastHeartbeatAt, u.now().Unix())
-	u.mutateConfig(func(cfg *config.Config) { cfg.Policy = policy })
+	u.mutateConfig(func(cfg *config.Config) {
+		cfg.Policy = policy
+		if keyExpiresAt != nil {
+			cfg.KeyExpiresAt = *keyExpiresAt
+		}
+	})
 }
 
 // mutateConfig best-effort loads the config, applies fn, and saves it back so

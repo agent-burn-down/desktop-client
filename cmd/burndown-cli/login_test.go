@@ -217,7 +217,7 @@ func (m *deviceMock) handleToken(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "expired_token"})
 	default:
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"collector_key": m.issuedKey, "key_id": "1", "key_expires_at": "2026-10-09T00:00:00Z",
+			"collector_key": m.issuedKey, "key_id": 1, "key_expires_at": "2026-10-09T00:00:00Z",
 		})
 	}
 }

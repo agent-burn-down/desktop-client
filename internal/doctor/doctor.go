@@ -190,6 +190,7 @@ func (d *Doctor) Run(ctx context.Context) []Result {
 		checkConfig(cfg, cfgErr, perms, d.cfgPath),
 		d.checkBackend(ctx, cfg, cfgErr),
 		d.checkHeartbeat(ctx, cfg, cfgErr),
+		checkKeyExpiry(cfg, cfgErr),
 		checkDaemon(daemonUp, d.port),
 		checkAgents(d.port),
 		d.checkQueue(daemonUp, hz),

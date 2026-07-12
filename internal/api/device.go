@@ -29,11 +29,13 @@ type DeviceAuth struct {
 }
 
 // DeviceToken is the response from POST /api/device/token once a grant has
-// been approved. CollectorKey is returned exactly once by the backend.
+// been approved. CollectorKey is returned exactly once by the backend. A
+// device-issued key always carries a fresh expiry (never nullable, unlike the
+// register/heartbeat key_expires_at, which can be null for legacy keys).
 type DeviceToken struct {
-	CollectorKey string  `json:"collector_key"`
-	KeyID        string  `json:"key_id"`
-	KeyExpiresAt *string `json:"key_expires_at"`
+	CollectorKey string `json:"collector_key"`
+	KeyID        int64  `json:"key_id"`
+	KeyExpiresAt string `json:"key_expires_at"`
 }
 
 // DeviceTokenError is returned while polling POST /api/device/token before it

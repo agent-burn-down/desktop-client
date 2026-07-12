@@ -79,7 +79,7 @@ func TestDeviceTokenApprovedNoAuthHeader(t *testing.T) {
 	var hadKey bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hadKey = r.Header.Get("X-Collector-Key") != ""
-		_, _ = io.WriteString(w, `{"collector_key":"abd_issued","key_id":"42",`+
+		_, _ = io.WriteString(w, `{"collector_key":"abd_issued","key_id":42,`+
 			`"key_expires_at":"2026-10-09T00:00:00Z"}`)
 	}))
 	defer srv.Close()
@@ -92,10 +92,10 @@ func TestDeviceTokenApprovedNoAuthHeader(t *testing.T) {
 	if hadKey {
 		t.Error("DeviceToken sent X-Collector-Key header, want none")
 	}
-	if dt.CollectorKey != "abd_issued" || dt.KeyID != "42" {
+	if dt.CollectorKey != "abd_issued" || dt.KeyID != 42 {
 		t.Errorf("token = %+v, want abd_issued/42", dt)
 	}
-	if dt.KeyExpiresAt == nil || *dt.KeyExpiresAt != "2026-10-09T00:00:00Z" {
+	if dt.KeyExpiresAt != "2026-10-09T00:00:00Z" {
 		t.Errorf("key_expires_at = %v", dt.KeyExpiresAt)
 	}
 }
