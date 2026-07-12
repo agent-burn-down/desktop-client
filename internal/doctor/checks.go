@@ -89,7 +89,11 @@ func (d *Doctor) checkHeartbeat(ctx context.Context, cfg *config.Config, cfgErr 
 	}
 	var authErr *api.AuthError
 	if errors.As(err, &authErr) {
-		return fail("heartbeat", "authentication rejected: "+authErr.Detail, loginHint)
+		reason := authErr.Code
+		if reason == "" {
+			reason = authErr.Detail
+		}
+		return fail("heartbeat", "authentication rejected: "+reason, loginHint)
 	}
 	return fail("heartbeat", "heartbeat failed: "+err.Error(),
 		"check api_url and network connectivity")

@@ -38,6 +38,7 @@ var knownFields = map[string]struct{}{
 	"old_key_valid_until":    {},
 	"last_rotation_at":       {},
 	"rotation_failures":      {},
+	"auth_reason":            {},
 }
 
 const (
@@ -88,6 +89,10 @@ type Config struct {
 	// RotationFailures counts consecutive failed rotation attempts, surfaced
 	// as an escalating warning in status/doctor.
 	RotationFailures int `json:"rotation_failures,omitempty"`
+	// AuthReason is the last standardized 401 code that put uploads in
+	// Degraded mode (key_revoked/key_invalid); empty while Active. Persisted
+	// so status/doctor are accurate even when the daemon is not running.
+	AuthReason string `json:"auth_reason,omitempty"`
 
 	// extra holds JSON fields not represented by the typed fields above, so
 	// they survive a load/save round-trip.

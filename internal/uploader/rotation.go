@@ -23,12 +23,8 @@ const (
 // start a new rotation if the current key is nearing expiry. A no-op without
 // a config store (some tests run the uploader without one).
 func (u *Uploader) RotateCheckOnce(ctx context.Context) {
-	if u.store == nil {
-		return
-	}
-	cfg, err := u.store.Load()
+	cfg, err := u.loadConfig()
 	if err != nil {
-		u.logger.Debug("skip rotation check: config load failed", "err", err)
 		return
 	}
 	if cfg.PendingKey != "" {
@@ -106,14 +102,17 @@ func (u *Uploader) recordFailedRotateAttempt(err error, at string) {
 // verifyPendingKey heartbeats with the pending key before committing it. The
 // live client's key is swapped only for the duration of this call —
 // RotateCheckOnce runs sequentially with FlushOnce/HeartbeatOnce within a
-// single Run cycle, so nothing else uses the client concurrently.
-func (u *Uploader) verifyPendingKey(ctx context.Context, cfg *config.Config) {
+// single Run cycle, so nothing else uses the client concurrently. Returns
+// true once the pending key is verified and committed — callers recovering
+// from a key_rotated 401 (#18) use this to decide whether they are back to
+// Active or must fall back to Degraded.
+func (u *Uploader) verifyPendingKey(ctx context.Context, cfg *config.Config) bool {
 	previous := u.client.Key()
 	u.client.SetKey(cfg.PendingKey)
 	_, err := u.client.Heartbeat(ctx, u.collectorID, nil)
 	if err == nil {
 		u.commitPendingKey(cfg)
-		return
+		return true
 	}
 	u.client.SetKey(previous) // keep serving on the still-valid old key
 	var authErr *api.AuthError
@@ -127,11 +126,12 @@ func (u *Uploader) verifyPendingKey(ctx context.Context, cfg *config.Config) {
 			c.RotationFailures++
 		})
 		u.logger.Warn("pending rotated key rejected; discarding and will re-rotate", "err", err)
-		return
+		return false
 	}
 	// Transient network/server error: keep the pending key for another try
 	// next cycle, still serving on the old key in the meantime.
 	u.logger.Info("could not verify pending rotated key yet; will retry", "err", err)
+	return false
 }
 
 // commitPendingKey promotes a verified pending key to the active key. The

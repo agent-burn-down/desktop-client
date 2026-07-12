@@ -48,6 +48,10 @@ type mockBackend struct {
 	// that specific key, simulating a network/server hiccup during
 	// verification rather than an auth rejection.
 	transientFailKey string
+	// authRejectCode, if set, makes an acceptedKeys rejection on
+	// heartbeat/events send {"error": authRejectCode} (the standardized 401
+	// contract) instead of the legacy {"detail": ...} shape.
+	authRejectCode string
 }
 
 // acceptsKey reports whether r's X-Collector-Key is acceptable, per
@@ -88,7 +92,7 @@ func (m *mockBackend) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if m.heartbeatFail || !acceptsKey(m.acceptedKeys, r) {
-		writeErr(w, http.StatusUnauthorized, "collector key revoked")
+		m.writeAuthReject(w, "collector key revoked")
 		return
 	}
 	_ = json.NewEncoder(w).Encode(api.HeartbeatOut{OK: true, Policy: m.policy, KeyExpiresAt: m.keyExpiresAt})
@@ -99,7 +103,7 @@ func (m *mockBackend) handleEvents(w http.ResponseWriter, r *http.Request) {
 	defer m.mu.Unlock()
 	m.eventPosts++
 	if m.eventsAuthFail || !acceptsKey(m.acceptedKeys, r) {
-		writeErr(w, http.StatusUnauthorized, "invalid collector key")
+		m.writeAuthReject(w, "invalid collector key")
 		return
 	}
 	if m.down {
@@ -141,6 +145,18 @@ func (m *mockBackend) handleRotate(w http.ResponseWriter, r *http.Request) {
 func writeErr(w http.ResponseWriter, code int, detail string) {
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"detail": detail})
+}
+
+// writeAuthReject writes a 401 using the standardized {"error": <code>} shape
+// when authRejectCode is set, else falls back to the legacy {"detail": ...}
+// body existing tests rely on.
+func (m *mockBackend) writeAuthReject(w http.ResponseWriter, legacyDetail string) {
+	if m.authRejectCode != "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": m.authRejectCode})
+		return
+	}
+	writeErr(w, http.StatusUnauthorized, legacyDetail)
 }
 
 func (m *mockBackend) uniqueDelivered() (unique, dupes int) {
@@ -316,6 +332,164 @@ func TestAuthFailurePausesUntilHeartbeat(t *testing.T) {
 	up.FlushOnce(context.Background())
 	if depth, _ := q.Depth(); depth != 0 {
 		t.Fatalf("depth after re-auth = %d, want 0", depth)
+	}
+}
+
+// TestDegradedNoRetryStormAndKeepsQueueing proves a key_revoked/key_invalid
+// 401 stops uploads entirely (zero POSTs beyond the initial rejection) while
+// new events keep enqueueing, and the cycle cadence slows to the probe
+// interval.
+func TestDegradedNoRetryStormAndKeepsQueueing(t *testing.T) {
+	mock := newMockBackend()
+	mock.acceptedKeys = map[string]bool{} // nothing accepted
+	mock.authRejectCode = api.CodeKeyRevoked
+	srv := mock.server(t)
+	up, q, reg := testDeps(t, mock, srv.URL)
+
+	_ = q.Enqueue(markedEvents(3))
+	up.HeartbeatOnce(context.Background())
+	if up.state() != stateDegraded {
+		t.Fatal("expected Degraded after a key_revoked heartbeat")
+	}
+	if reg.Get(counters.AuthFailed) != 1 {
+		t.Fatal("auth_failed counter should be set")
+	}
+
+	for i := 0; i < 5; i++ {
+		up.FlushOnce(context.Background())
+	}
+	mock.mu.Lock()
+	posts := mock.eventPosts
+	mock.mu.Unlock()
+	if posts != 0 {
+		t.Fatalf("event POSTs while degraded = %d, want 0 (no retry storm)", posts)
+	}
+
+	_ = q.Enqueue(markedEvents(2))
+	if d, _ := q.Depth(); d != 5 {
+		t.Fatalf("depth = %d, want 5 (events preserved and still accepted while degraded)", d)
+	}
+	if got := up.cycleDelay(); got != degradedProbeInterval {
+		t.Fatalf("cycleDelay while degraded = %v, want the slow probe interval %v",
+			got, degradedProbeInterval)
+	}
+}
+
+// TestReLoginRecoversWithoutRestartAndDrainsBacklog proves an out-of-band
+// `burndown-cli login` (rewriting config's key while the daemon keeps
+// running) is picked up by the next Degraded probe cycle, without a restart,
+// and the queued backlog drains immediately after.
+func TestReLoginRecoversWithoutRestartAndDrainsBacklog(t *testing.T) {
+	mock := newMockBackend()
+	mock.acceptedKeys = map[string]bool{}
+	mock.authRejectCode = api.CodeKeyRevoked
+	srv := mock.server(t)
+	up, q, _ := testDeps(t, mock, srv.URL)
+	store := newMemStore()
+	store.saved.CollectorKey = "yaahc_test"
+	up.store = store
+
+	_ = q.Enqueue(markedEvents(3))
+	up.runCycle(context.Background()) // heartbeat 401s -> Degraded; flush/rotate skipped
+	if up.state() != stateDegraded {
+		t.Fatal("expected Degraded")
+	}
+	mock.mu.Lock()
+	posts := mock.eventPosts
+	mock.mu.Unlock()
+	if posts != 0 {
+		t.Fatalf("flush should have been skipped entirely while degraded; event posts = %d", posts)
+	}
+
+	// Simulate `burndown-cli login` writing a fresh key while the daemon runs.
+	mock.mu.Lock()
+	mock.acceptedKeys["abd_fresh"] = true
+	mock.mu.Unlock()
+	store.saved.CollectorKey = "abd_fresh"
+
+	up.runCycle(context.Background()) // reloads the key, probes, recovers, drains
+	if up.state() != stateActive {
+		t.Fatal("expected Active after re-login")
+	}
+	if got := up.client.Key(); got != "abd_fresh" {
+		t.Fatalf("client key = %q, want abd_fresh", got)
+	}
+	if d, _ := q.Depth(); d != 0 {
+		t.Fatalf("backlog not drained after recovery: depth %d", d)
+	}
+}
+
+// TestKeyRotatedSwapsToPendingKey proves a key_rotated 401 on the old key
+// adopts a cached pending key (from a rotation this instance already started)
+// without needing a re-login.
+func TestKeyRotatedSwapsToPendingKey(t *testing.T) {
+	mock := newMockBackend()
+	mock.acceptedKeys = map[string]bool{"abd_newkey": true} // old key now dead
+	mock.authRejectCode = api.CodeKeyRotated
+	srv := mock.server(t)
+	up, _, _ := testDeps(t, mock, srv.URL) // client starts on "yaahc_test"
+	store := newMemStore()
+	store.saved.CollectorKey = "yaahc_test"
+	store.saved.PendingKey = "abd_newkey"
+	store.saved.PendingKeyID = 5
+	store.saved.PendingKeyExpires = "2027-01-01T00:00:00Z"
+	up.store = store
+
+	up.HeartbeatOnce(context.Background())
+
+	if up.state() != stateActive {
+		t.Fatal("expected Active after adopting the cached pending key")
+	}
+	if got := up.client.Key(); got != "abd_newkey" {
+		t.Fatalf("client key = %q, want abd_newkey", got)
+	}
+	if store.saved.CollectorKey != "abd_newkey" || store.saved.PendingKey != "" {
+		t.Fatalf("config not committed: %+v", store.saved)
+	}
+}
+
+// TestKeyRotatedWithoutPendingDegrades proves a key_rotated 401 with no
+// cached pending key (e.g. another instance rotated it) degrades, since there
+// is no way to recover the new key without a fresh login.
+func TestKeyRotatedWithoutPendingDegrades(t *testing.T) {
+	mock := newMockBackend()
+	mock.acceptedKeys = map[string]bool{}
+	mock.authRejectCode = api.CodeKeyRotated
+	srv := mock.server(t)
+	up, _, _ := testDeps(t, mock, srv.URL)
+	store := newMemStore() // no PendingKey
+	store.saved.CollectorKey = "yaahc_test"
+	up.store = store
+
+	up.HeartbeatOnce(context.Background())
+
+	if up.state() != stateDegraded {
+		t.Fatal("expected Degraded when key_rotated has no pending key to adopt")
+	}
+}
+
+// TestKeyExpiredRotateFailsDegrades proves the realistic case: an already-
+// expired key cannot authenticate the rotate call either (the backend
+// requires a currently-valid key to rotate), so the one immediate rotate
+// attempt fails and the daemon degrades. #17's proactive T-7d rotation is
+// what normally prevents this path from firing at all.
+func TestKeyExpiredRotateFailsDegrades(t *testing.T) {
+	mock := newMockBackend()
+	mock.acceptedKeys = map[string]bool{} // the expired key can't rotate either
+	mock.authRejectCode = api.CodeKeyExpired
+	srv := mock.server(t)
+	up, _, _ := testDeps(t, mock, srv.URL)
+	store := newMemStore()
+	store.saved.CollectorKey = "yaahc_test"
+	up.store = store
+
+	up.HeartbeatOnce(context.Background())
+
+	if up.state() != stateDegraded {
+		t.Fatal("expected Degraded when the expired key cannot rotate either")
+	}
+	if mock.rotateCalls != 1 {
+		t.Fatalf("rotate calls = %d, want exactly 1 (a single immediate attempt)", mock.rotateCalls)
 	}
 }
 

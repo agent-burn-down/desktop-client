@@ -14,6 +14,10 @@ import (
 	"github.com/agent-burn-down/desktop-client/internal/version"
 )
 
+// errNoStore marks an uploader running without a config store (some tests);
+// pending-key/degraded-state reads are simply skipped in that case.
+var errNoStore = errors.New("uploader: no config store configured")
+
 const (
 	// leaseDuration is how long a batch stays leased while its upload is in
 	// flight. It must exceed the api client's worst-case call time (10s timeout
@@ -22,6 +26,20 @@ const (
 	// maxBackoff caps the extra delay added between flush cycles while the
 	// backend is unreachable, so an extended outage backs off without a storm.
 	maxBackoff = 5 * time.Minute
+	// degradedProbeInterval is the heartbeat-only cadence while Degraded: slow
+	// enough that probing a revoked/invalid key is not itself a retry storm,
+	// fast enough to notice a re-login within a few minutes.
+	degradedProbeInterval = 5 * time.Minute
+)
+
+// uploadState is Active (normal operation) or Degraded (a 401 the daemon
+// cannot self-heal from without a fresh login: key_revoked, key_invalid, or a
+// key_expired/key_rotated recovery attempt that itself failed).
+type uploadState int
+
+const (
+	stateActive uploadState = iota
+	stateDegraded
 )
 
 // Config constructs an Uploader.
@@ -48,10 +66,11 @@ type Uploader struct {
 
 	now func() time.Time
 
-	mu      sync.Mutex
-	policy  api.Policy
-	authOK  bool
-	backoff time.Duration
+	mu         sync.Mutex
+	policy     api.Policy
+	mode       uploadState
+	authReason string
+	backoff    time.Duration
 }
 
 // New returns an Uploader. Flushing is enabled until a 401 pauses it.
@@ -65,34 +84,60 @@ func New(cfg Config) *Uploader {
 		collectorID: cfg.CollectorID,
 		now:         time.Now,
 		policy:      cfg.Policy,
-		authOK:      true,
+		mode:        stateActive,
 	}
 }
 
-// Run drives flush and heartbeat cycles until ctx is cancelled. Each cycle
-// heartbeats (refreshing the live policy) then flushes; the next cycle is
-// scheduled from the current policy's flush interval, so a policy change takes
-// effect within one cycle without a restart.
+// Run drives flush and heartbeat cycles until ctx is cancelled. Each Active
+// cycle heartbeats (refreshing the live policy), checks rotation, then
+// flushes; a Degraded cycle only probes (see runCycle), on a slower cadence.
+// The next cycle's delay is recomputed every time, so a policy change or a
+// state transition takes effect within one cycle without a restart.
 func (u *Uploader) Run(ctx context.Context) {
 	u.HeartbeatOnce(ctx)
-	u.RotateCheckOnce(ctx)
-	timer := time.NewTimer(u.flushDelay())
+	if u.state() == stateActive {
+		u.RotateCheckOnce(ctx)
+	}
+	timer := time.NewTimer(u.cycleDelay())
 	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
-			u.HeartbeatOnce(ctx)
-			u.RotateCheckOnce(ctx)
-			u.FlushOnce(ctx)
-			timer.Reset(u.flushDelay())
+			u.runCycle(ctx)
+			timer.Reset(u.cycleDelay())
 		}
 	}
 }
 
-// flushDelay is the wait before the next cycle: the policy flush interval,
-// extended to the current backoff while the backend is unreachable.
+// runCycle executes one heartbeat/rotate/flush cycle. While Degraded it only
+// probes: it first reloads the key from config (so an out-of-band
+// `burndown-cli login` run while the daemon is up is picked up without a
+// restart), then heartbeats; rotation and flush are skipped, since there is
+// nothing productive to rotate or upload against a dead key.
+func (u *Uploader) runCycle(ctx context.Context) {
+	if u.state() == stateDegraded {
+		u.reloadKeyIfChanged()
+	}
+	u.HeartbeatOnce(ctx)
+	if u.state() != stateActive {
+		return
+	}
+	u.RotateCheckOnce(ctx)
+	u.FlushOnce(ctx)
+}
+
+// cycleDelay is the wait before the next cycle: the degraded probe interval
+// while Degraded, otherwise the policy flush interval extended to the current
+// backoff while the backend is unreachable.
+func (u *Uploader) cycleDelay() time.Duration {
+	if u.state() == stateDegraded {
+		return degradedProbeInterval
+	}
+	return u.flushDelay()
+}
+
 func (u *Uploader) flushDelay() time.Duration {
 	base := u.snapshotPolicy().FlushInterval()
 	u.mu.Lock()
@@ -103,11 +148,24 @@ func (u *Uploader) flushDelay() time.Duration {
 	return base
 }
 
+// reloadKeyIfChanged re-reads the collector key from config and swaps it into
+// the live client if it changed. This is what lets a fresh `burndown-cli
+// login` resume a running daemon's uploads without a restart.
+func (u *Uploader) reloadKeyIfChanged() {
+	cfg, err := u.loadConfig()
+	if err != nil {
+		return
+	}
+	if cfg.CollectorKey != "" && cfg.CollectorKey != u.client.Key() {
+		u.client.SetKey(cfg.CollectorKey)
+	}
+}
+
 // FlushOnce drains the queue in policy-sized batches until it is empty or a
 // send fails. On failure the batch is nacked (re-leasable next cycle) and the
 // cycle stops, so nothing is lost and there is no tight retry loop.
 func (u *Uploader) FlushOnce(ctx context.Context) {
-	if !u.authorized() {
+	if u.state() != stateActive {
 		return
 	}
 	batchSize := u.snapshotPolicy().BatchSize()
@@ -135,7 +193,7 @@ func (u *Uploader) sendBatch(ctx context.Context, items []queue.Item) bool {
 	counts, err := u.client.SendEvents(ctx, u.collectorID, events)
 	if err != nil {
 		_ = u.queue.Nack(ids)
-		u.handleSendError(err)
+		u.handleSendError(ctx, err)
 		return false
 	}
 	if err := u.queue.Ack(ids); err != nil {
@@ -145,15 +203,13 @@ func (u *Uploader) sendBatch(ctx context.Context, items []queue.Item) bool {
 	return true
 }
 
-// handleSendError records a failed send. A 401 pauses flushing until the next
-// successful heartbeat; other errors are logged once at reduced level and the
-// backoff is widened so an outage does not spam.
-func (u *Uploader) handleSendError(err error) {
+// handleSendError records a failed send. A 401 is dispatched by standardized
+// code (see handleAuthError); other errors are logged once at reduced level
+// and the backoff is widened so an outage does not spam.
+func (u *Uploader) handleSendError(ctx context.Context, err error) {
 	var authErr *api.AuthError
 	if errors.As(err, &authErr) {
-		u.onAuthFailure()
-		u.logger.Warn("upload rejected: collector key unauthorized; pausing until heartbeat re-auth",
-			"detail", authErr.Detail)
+		u.handleAuthError(ctx, authErr)
 		return
 	}
 	u.counters.Add(counters.UploadErrors, 1)
@@ -161,15 +217,16 @@ func (u *Uploader) handleSendError(err error) {
 	u.logger.Info("upload deferred: backend unreachable, will retry next cycle", "err", err)
 }
 
-// HeartbeatOnce reports liveness and swaps in any refreshed policy. A 401
-// leaves flushing paused; a success re-enables it.
+// HeartbeatOnce reports liveness and swaps in any refreshed policy. A 401 is
+// dispatched by standardized code (see handleAuthError); a success re-enables
+// Active mode.
 func (u *Uploader) HeartbeatOnce(ctx context.Context) {
 	tel := u.telemetry()
 	out, err := u.client.Heartbeat(ctx, u.collectorID, &tel)
 	if err != nil {
 		var authErr *api.AuthError
 		if errors.As(err, &authErr) {
-			u.onAuthFailure()
+			u.handleAuthError(ctx, authErr)
 			return
 		}
 		u.counters.Add(counters.HeartbeatErrors, 1)
@@ -196,12 +253,10 @@ func (u *Uploader) telemetry() counters.Telemetry {
 // untouched rather than cleared, since a legacy client that never sends
 // key_expires_at must not be misread as "just started expiring").
 func (u *Uploader) onHeartbeatOK(policy api.Policy, keyExpiresAt *string) {
+	u.enterActive()
 	u.mu.Lock()
 	u.policy = policy
-	u.authOK = true
-	u.backoff = 0
 	u.mu.Unlock()
-	u.counters.Set(counters.AuthFailed, 0)
 	u.counters.Set(counters.LastHeartbeatAt, u.now().Unix())
 	u.mutateConfig(func(cfg *config.Config) {
 		cfg.Policy = policy
@@ -209,6 +264,86 @@ func (u *Uploader) onHeartbeatOK(policy api.Policy, keyExpiresAt *string) {
 			cfg.KeyExpiresAt = *keyExpiresAt
 		}
 	})
+}
+
+// handleAuthError dispatches a 401 by its standardized code (#21's contract):
+//   - key_rotated: adopt a cached pending key (from a rotation this instance
+//     or another one started) if one exists; otherwise there is no way to
+//     recover the new key, so this degrades like key_invalid.
+//   - key_expired: attempt one immediate rotate+verify (bypassing the T-7d/
+//     once-a-day gate — the key is already dead right now); success recovers,
+//     failure degrades. #17's proactive rotation is what normally prevents
+//     this path from firing at all.
+//   - key_revoked / key_invalid / anything unrecognized: degrade immediately.
+//     No retry storm: FlushOnce stops entirely and the heartbeat probe cadence
+//     slows to degradedProbeInterval (see runCycle/cycleDelay).
+func (u *Uploader) handleAuthError(ctx context.Context, authErr *api.AuthError) {
+	switch authErr.Code {
+	case api.CodeKeyRotated:
+		u.recoverViaPendingKeyOrDegrade(ctx)
+	case api.CodeKeyExpired:
+		u.attemptRotate(ctx)
+		u.recoverViaPendingKeyOrDegrade(ctx)
+	default:
+		u.enterDegraded(authErr.Code)
+	}
+}
+
+// recoverViaPendingKeyOrDegrade tries to verify+adopt whatever pending key is
+// currently persisted; degrades if there is none or adopting it fails.
+func (u *Uploader) recoverViaPendingKeyOrDegrade(ctx context.Context) {
+	cfg, err := u.loadConfig()
+	if err != nil || cfg.PendingKey == "" {
+		u.enterDegraded(api.CodeKeyInvalid)
+		return
+	}
+	if u.verifyPendingKey(ctx, cfg) {
+		u.enterActive()
+		return
+	}
+	u.enterDegraded(api.CodeKeyInvalid)
+}
+
+// enterDegraded transitions to Degraded and persists the reason (so status/
+// doctor are accurate even while the daemon is down). Logs only on the actual
+// Active -> Degraded transition, never once per cycle.
+func (u *Uploader) enterDegraded(reason string) {
+	u.mu.Lock()
+	transitioning := u.mode != stateDegraded
+	u.mode = stateDegraded
+	u.authReason = reason
+	u.mu.Unlock()
+	u.counters.Set(counters.AuthFailed, 1)
+	u.mutateConfig(func(cfg *config.Config) { cfg.AuthReason = reason })
+	if transitioning {
+		u.logger.Warn("collector key unauthorized; uploads paused, still queueing locally",
+			"reason", reason, "hint", "run `burndown-cli login`")
+	}
+}
+
+// enterActive transitions to Active (a no-op if already there) and clears any
+// degraded reason.
+func (u *Uploader) enterActive() {
+	u.mu.Lock()
+	wasDegraded := u.mode == stateDegraded
+	u.mode = stateActive
+	u.authReason = ""
+	u.backoff = 0
+	u.mu.Unlock()
+	u.counters.Set(counters.AuthFailed, 0)
+	u.mutateConfig(func(cfg *config.Config) { cfg.AuthReason = "" })
+	if wasDegraded {
+		u.logger.Info("collector key recovered; resuming uploads")
+	}
+}
+
+// loadConfig is a read-only counterpart to mutateConfig for callers that only
+// need to inspect current state (e.g. whether a pending key exists).
+func (u *Uploader) loadConfig() (*config.Config, error) {
+	if u.store == nil {
+		return nil, errNoStore
+	}
+	return u.store.Load()
 }
 
 // mutateConfig best-effort loads the config, applies fn, and saves it back so
@@ -244,13 +379,6 @@ func (u *Uploader) onFlushSuccess() {
 	u.mu.Unlock()
 }
 
-func (u *Uploader) onAuthFailure() {
-	u.mu.Lock()
-	u.authOK = false
-	u.mu.Unlock()
-	u.counters.Set(counters.AuthFailed, 1)
-}
-
 func (u *Uploader) widenBackoff() {
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -264,10 +392,10 @@ func (u *Uploader) widenBackoff() {
 	}
 }
 
-func (u *Uploader) authorized() bool {
+func (u *Uploader) state() uploadState {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	return u.authOK
+	return u.mode
 }
 
 func (u *Uploader) snapshotPolicy() api.Policy {

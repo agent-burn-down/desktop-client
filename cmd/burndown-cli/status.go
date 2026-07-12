@@ -49,6 +49,7 @@ type statusReport struct {
 	RotationPending  bool                `json:"rotation_pending,omitempty"`
 	RotationFailures int                 `json:"rotation_failures,omitempty"`
 	LastRotationAt   string              `json:"last_rotation_at,omitempty"`
+	AuthReason       string              `json:"auth_reason,omitempty"`
 	Counters         map[string]int64    `json:"counters,omitempty"`
 	Telemetry        *counters.Telemetry `json:"telemetry,omitempty"`
 }
@@ -64,6 +65,7 @@ func runStatus(cmd *cobra.Command, port int, asJSON bool) error {
 		report.RotationPending = cfg.PendingKey != ""
 		report.RotationFailures = cfg.RotationFailures
 		report.LastRotationAt = cfg.LastRotationAt
+		report.AuthReason = cfg.AuthReason
 	}
 	if hz, err := probeHealthz(cmd.Context(), port); err == nil {
 		report.DaemonUp = true
@@ -110,6 +112,9 @@ func writeTextReport(w io.Writer, report statusReport) {
 	outf(w, "collector_id: %s\n", idDisplay(report.CollectorID))
 	if report.KeyPrefix != "" {
 		outf(w, "key_expiry:   %s\n", rotationDisplay(report))
+	}
+	if report.AuthReason != "" {
+		outf(w, "auth:         DEGRADED (%s) — run `burndown-cli login`\n", report.AuthReason)
 	}
 	if report.DaemonUp {
 		writeCounters(w, report.Counters)
