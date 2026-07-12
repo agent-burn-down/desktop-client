@@ -43,7 +43,8 @@ func TestRegisterHappyPath(t *testing.T) {
 		gotBody = decodeBody(t, r)
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, `{"collector_id":123,"policy":`+
-			`{"flush_interval_seconds":30,"max_batch_size":500,"refresh_cadence":"near-real-time"}}`)
+			`{"flush_interval_seconds":30,"max_batch_size":500,"refresh_cadence":"near-real-time"},`+
+			`"key_expires_at":"2026-10-09T00:00:00Z"}`)
 	}))
 	defer srv.Close()
 
@@ -56,6 +57,9 @@ func TestRegisterHappyPath(t *testing.T) {
 	}
 	if out.Policy.MaxBatchSize != 500 {
 		t.Errorf("policy.max_batch_size = %d, want 500", out.Policy.MaxBatchSize)
+	}
+	if out.KeyExpiresAt == nil || *out.KeyExpiresAt != "2026-10-09T00:00:00Z" {
+		t.Errorf("key_expires_at = %v, want 2026-10-09T00:00:00Z", out.KeyExpiresAt)
 	}
 	if gotReq.Method != http.MethodPost || gotReq.URL.Path != "/ingest/v1/register" {
 		t.Errorf("request = %s %s, want POST /ingest/v1/register", gotReq.Method, gotReq.URL.Path)
@@ -80,7 +84,7 @@ func TestHeartbeatHappyPath(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotBody = decodeBody(t, r)
-		_, _ = io.WriteString(w, `{"ok":true,"policy":{"max_batch_size":500}}`)
+		_, _ = io.WriteString(w, `{"ok":true,"policy":{"max_batch_size":500},"key_expires_at":null}`)
 	}))
 	defer srv.Close()
 
@@ -96,6 +100,9 @@ func TestHeartbeatHappyPath(t *testing.T) {
 	}
 	if gotBody["collector_id"] != float64(123) {
 		t.Errorf("collector_id = %v, want 123", gotBody["collector_id"])
+	}
+	if out.KeyExpiresAt != nil {
+		t.Errorf("key_expires_at = %v, want nil for a legacy/never-expiring key", out.KeyExpiresAt)
 	}
 }
 
@@ -151,6 +158,45 @@ func TestAuth401NotRetried(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(&calls); n != 1 {
 		t.Errorf("server called %d times, want 1 (no retry on 401)", n)
+	}
+}
+
+// TestAuth401CodeParsing covers the standardized error contract
+// ({"error": <code>}) the live backend now sends, plus the legacy
+// {"detail": ...}-only shape for backward compatibility.
+func TestAuth401CodeParsing(t *testing.T) {
+	cases := []struct {
+		name       string
+		body       string
+		wantCode   string
+		wantDetail string
+	}{
+		{"key_invalid", `{"error":"key_invalid"}`, CodeKeyInvalid, ""},
+		{"key_revoked", `{"error":"key_revoked"}`, CodeKeyRevoked, ""},
+		{"key_expired", `{"error":"key_expired"}`, CodeKeyExpired, ""},
+		{"key_rotated", `{"error":"key_rotated"}`, CodeKeyRotated, ""},
+		{"legacy_detail_only", `{"detail":"invalid collector key"}`, "", "invalid collector key"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			_, err := newTestClient(t, srv).Heartbeat(context.Background(), 1, nil)
+			var authErr *AuthError
+			if !errors.As(err, &authErr) {
+				t.Fatalf("error = %v, want *AuthError", err)
+			}
+			if authErr.Code != tc.wantCode {
+				t.Errorf("code = %q, want %q", authErr.Code, tc.wantCode)
+			}
+			if authErr.Detail != tc.wantDetail {
+				t.Errorf("detail = %q, want %q", authErr.Detail, tc.wantDetail)
+			}
+		})
 	}
 }
 
@@ -232,6 +278,30 @@ func TestSendEventsRejectsOversizedBatch(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(&calls); n != 0 {
 		t.Errorf("server called %d times, want 0 (rejected client-side)", n)
+	}
+}
+
+func TestSetKeySwapsSubsequentRequests(t *testing.T) {
+	var gotKeys []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotKeys = append(gotKeys, r.Header.Get("X-Collector-Key"))
+		_, _ = io.WriteString(w, `{"ok":true,"policy":{}}`)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv)
+	if _, err := c.Heartbeat(context.Background(), 1, nil); err != nil {
+		t.Fatalf("Heartbeat (before swap): %v", err)
+	}
+	c.SetKey("new_key")
+	if got := c.Key(); got != "new_key" {
+		t.Errorf("Key() = %q, want new_key", got)
+	}
+	if _, err := c.Heartbeat(context.Background(), 1, nil); err != nil {
+		t.Fatalf("Heartbeat (after swap): %v", err)
+	}
+	if len(gotKeys) != 2 || gotKeys[0] != "yaahc_test_key" || gotKeys[1] != "new_key" {
+		t.Errorf("keys seen by server = %v, want [yaahc_test_key new_key]", gotKeys)
 	}
 }
 

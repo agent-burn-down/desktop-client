@@ -197,23 +197,25 @@ func (u *Uploader) onHeartbeatOK(policy api.Policy) {
 	u.mu.Unlock()
 	u.counters.Set(counters.AuthFailed, 0)
 	u.counters.Set(counters.LastHeartbeatAt, u.now().Unix())
-	u.persistPolicy(policy)
+	u.mutateConfig(func(cfg *config.Config) { cfg.Policy = policy })
 }
 
-// persistPolicy best-effort writes the refreshed policy to the config store so
-// it survives a restart. Failures are logged, not surfaced.
-func (u *Uploader) persistPolicy(policy api.Policy) {
+// mutateConfig best-effort loads the config, applies fn, and saves it back so
+// changes survive a restart. Failures are logged, not surfaced — the uploader
+// keeps running on in-memory state either way. Shared by policy persistence,
+// key-rotation state, and auth-reason persistence.
+func (u *Uploader) mutateConfig(fn func(*config.Config)) {
 	if u.store == nil {
 		return
 	}
 	cfg, err := u.store.Load()
 	if err != nil {
-		u.logger.Debug("skip policy persist: config load failed", "err", err)
+		u.logger.Debug("skip config persist: load failed", "err", err)
 		return
 	}
-	cfg.Policy = policy
+	fn(cfg)
 	if err := u.store.Save(cfg); err != nil {
-		u.logger.Debug("skip policy persist: config save failed", "err", err)
+		u.logger.Debug("skip config persist: save failed", "err", err)
 	}
 }
 
