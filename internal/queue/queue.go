@@ -29,7 +29,15 @@ const (
 	defaultMaxRows  int64 = 50_000
 	defaultMaxBytes int64 = 100 * 1024 * 1024
 	evictChunk      int64 = 512
-	timeLayout            = time.RFC3339Nano
+	// timeLayout is a FIXED-WIDTH UTC layout used for every TEXT timestamp the
+	// queue writes (created_at, acked_at, leased_until) and every cutoff it
+	// compares against in SQL. It must stay fixed-width: time.RFC3339Nano trims
+	// trailing fractional zeros, so ".1Z" and ".12Z" sort lexicographically
+	// opposite to chronological order, silently corrupting SQLite TEXT range
+	// comparisons (lease expiry, retention prune, stats window). A full 9-digit
+	// fraction keeps string order == time order. Always format after .UTC() so
+	// the zone suffix is always "Z" and every value shares one timeline.
+	timeLayout = "2006-01-02T15:04:05.000000000Z07:00"
 	// DefaultTopTools is the number of tool_name rows returned by StatsSince.
 	DefaultTopTools = 10
 )

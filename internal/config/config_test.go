@@ -193,6 +193,12 @@ func TestRetentionDefaultAndOverride(t *testing.T) {
 	if got := (&Config{RetentionDays: 14}).Retention(); got != 14 {
 		t.Errorf("retention = %d, want 14", got)
 	}
+	if got := (&Config{RetentionDays: 99999}).Retention(); got != maxRetentionDays {
+		t.Errorf("oversized retention = %d, want clamp %d", got, maxRetentionDays)
+	}
+	if got := (&Config{RetentionDays: maxRetentionDays}).Retention(); got != maxRetentionDays {
+		t.Errorf("boundary retention = %d, want %d", got, maxRetentionDays)
+	}
 }
 
 func TestRetentionDaysRoundTrip(t *testing.T) {

@@ -69,6 +69,84 @@ func TestPruneAckedDeletesOnlyOldAcked(t *testing.T) {
 	}
 }
 
+// TestPruneAckedFractionalSecondBoundary is the auditor's repro: acked rows in
+// the same wall-clock second whose sub-second fractions, if formatted with a
+// zero-trimming layout (RFC3339Nano), sort lexicographically opposite to
+// chronological order. The row older than the cutoff must still be pruned.
+func TestPruneAckedFractionalSecondBoundary(t *testing.T) {
+	q := openTemp(t, Options{})
+	base := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	older := base.Add(100 * time.Millisecond)  // ".1"  - older than cutoff, delete
+	cutoff := base.Add(120 * time.Millisecond) // ".12" - the prune boundary
+	newer := base.Add(130 * time.Millisecond)  // ".13" - newer than cutoff, keep
+	insertAcked(t, q, older, ackedEvent("", 1, 1, 0, ""))
+	insertAcked(t, q, newer, ackedEvent("", 1, 1, 0, ""))
+
+	deleted, err := q.PruneAcked(cutoff)
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted = %d, want 1 (older fractional row must be pruned)", deleted)
+	}
+	survivors, _ := q.scalar("SELECT COUNT(*) FROM queue WHERE state='acked'")
+	if survivors != 1 {
+		t.Fatalf("acked survivors = %d, want 1 (only the newer row)", survivors)
+	}
+}
+
+// TestLeaseExpiryFractionalSecondBoundary proves the lease-expiry comparison
+// (leased_until < now) shares the fixed-width fix: a lease that expired at a
+// ".1" fraction is re-leasable at a ".12" now, which a zero-trimming layout
+// would misorder.
+func TestLeaseExpiryFractionalSecondBoundary(t *testing.T) {
+	q := openTemp(t, Options{})
+	base := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	leasedUntil := base.Add(100 * time.Millisecond).Format(timeLayout) // ".1"
+	_, err := q.db.Exec(
+		`INSERT INTO queue(event_id, payload, created_at, state, leased_until)
+		 VALUES('e','{}',?,'leased',?)`, leasedUntil, leasedUntil)
+	if err != nil {
+		t.Fatalf("insert leased: %v", err)
+	}
+
+	ids, items, err := q.selectLeasable(base.Add(120*time.Millisecond), 10) // now ".12"
+	if err != nil {
+		t.Fatalf("selectLeasable: %v", err)
+	}
+	if len(ids) != 1 || len(items) != 1 {
+		t.Fatalf("expired lease not re-leasable: got %d rows, want 1", len(ids))
+	}
+}
+
+// TestTimeLayoutSortsChronologically guards the invariant every queue TEXT
+// timestamp relies on: fixed-width formatting so lexicographic (SQLite TEXT)
+// order equals chronological order even across fractional-second boundaries.
+func TestTimeLayoutSortsChronologically(t *testing.T) {
+	base := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	times := []time.Time{
+		base.Add(100 * time.Millisecond),
+		base.Add(120 * time.Millisecond),
+		base,
+		base.Add(1 * time.Nanosecond),
+		base.Add(time.Second),
+	}
+	for i := 1; i < len(times); i++ {
+		for j := 0; j < i; j++ {
+			earlier, later := times[j], times[i]
+			if later.Before(earlier) {
+				earlier, later = later, earlier
+			}
+			a := earlier.UTC().Format(timeLayout)
+			b := later.UTC().Format(timeLayout)
+			if a >= b && !earlier.Equal(later) {
+				t.Fatalf("string order disagrees with time order: %q (%v) !< %q (%v)",
+					a, earlier, b, later)
+			}
+		}
+	}
+}
+
 // TestRetentionSoakKeepsDBBounded simulates 30 days of daily acked batches with a
 // moving 7-day retention cutoff and asserts the row count never grows unbounded.
 func TestRetentionSoakKeepsDBBounded(t *testing.T) {

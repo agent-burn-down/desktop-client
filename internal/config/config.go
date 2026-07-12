@@ -33,9 +33,14 @@ var knownFields = map[string]struct{}{
 	"retention_days": {},
 }
 
-// DefaultRetentionDays is the retention window applied when retention_days is
-// unset or non-positive: acked queue rows older than this are pruned locally.
-const DefaultRetentionDays = 7
+const (
+	// DefaultRetentionDays is the retention window applied when retention_days is
+	// unset or non-positive: acked queue rows older than this are pruned locally.
+	DefaultRetentionDays = 7
+	// maxRetentionDays clamps an out-of-range retention_days (~10 years) so a
+	// typo cannot disable pruning or drive an absurd stats window.
+	maxRetentionDays = 3650
+)
 
 // Config is the persisted collector configuration.
 //
@@ -103,13 +108,18 @@ func (c *Config) MarshalJSON() ([]byte, error) {
 	return json.Marshal(merged)
 }
 
-// Retention returns the local retention window in days, falling back to
-// DefaultRetentionDays when unset or non-positive.
+// Retention returns the local retention window in days, clamped to a sane range:
+// a zero or negative value falls back to DefaultRetentionDays, and anything above
+// maxRetentionDays is capped there.
 func (c *Config) Retention() int {
-	if c.RetentionDays <= 0 {
+	switch {
+	case c.RetentionDays <= 0:
 		return DefaultRetentionDays
+	case c.RetentionDays > maxRetentionDays:
+		return maxRetentionDays
+	default:
+		return c.RetentionDays
 	}
-	return c.RetentionDays
 }
 
 // Store abstracts loading and saving collector configuration so a future
