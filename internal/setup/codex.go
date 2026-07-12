@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 
@@ -32,14 +33,30 @@ func (p *CodexPlan) Empty() bool { return len(p.changes) == 0 }
 // Descriptions returns the human-readable edit lines.
 func (p *CodexPlan) Descriptions() []string { return p.changes }
 
+// codexScalars is the fixed set of [otel] scalar keys the writer manages, in
+// insertion order, paired with the TOML-rendered value and the Go value the
+// post-edit assertion expects to read back.
+var codexScalars = []struct {
+	key, value string
+	want       any
+}{
+	{"environment", `"control-center"`, "control-center"},
+	{"metrics_exporter", `"none"`, "none"},
+	{"trace_exporter", `"none"`, "none"},
+	{"log_user_prompt", "false", false},
+}
+
 // PlanCodex computes the pending config.toml edits for the given receiver port.
 // The four scalar [otel] keys are inserted only when absent (existing values
 // preserved); otel.exporter is replaced-or-inserted; and any stale nested
 // otel.exporter."otlp-http" / otel.exporter.otlp-http tables are removed.
 //
-// When the edit would change anything, the resulting text is parsed with a real
-// TOML parser and rejected (the file is left untouched) if it is not valid TOML
-// or would contain duplicate keys, so a hand-edit can never corrupt the file.
+// When the edit would change anything, the result is parsed with a real TOML
+// parser AND structurally asserted: the [otel] table must actually hold every
+// key we inserted with the intended value, plus the exporter. If that fails
+// (for example a triple-quoted string with an unbalanced bracket steering keys
+// into the wrong table), the edit is refused and the file left untouched, so
+// the writer can never corrupt the file or silently misconfigure Codex.
 func PlanCodex(port int) (*CodexPlan, error) {
 	dir, err := CodexDir()
 	if err != nil {
@@ -50,12 +67,12 @@ func PlanCodex(port int) (*CodexPlan, error) {
 	if err != nil {
 		return nil, err
 	}
-	text, changes := editCodex(text, port)
+	text, changes, added := editCodex(text, port)
 	plan := &CodexPlan{Path: path, text: text, changes: changes}
 	if !plan.Empty() {
-		if err := validateCodexTOML(text); err != nil {
+		if err := verifyCodexEdit(text, port, added); err != nil {
 			return nil, fmt.Errorf(
-				"refusing to edit %s: the change would produce invalid TOML (%w); "+
+				"refusing to edit %s: %w; add the [otel] settings manually; "+
 					"file left unchanged", path, err)
 		}
 	}
@@ -63,23 +80,21 @@ func PlanCodex(port int) (*CodexPlan, error) {
 }
 
 // editCodex applies the four scalar-key insertions and the exporter edit,
-// returning the new text and a description of each change made.
-func editCodex(text string, port int) (string, []string) {
+// returning the new text, a description of each change made, and the set of
+// scalar keys actually inserted (key -> expected decoded value) for assertion.
+func editCodex(text string, port int) (string, []string, map[string]any) {
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d/v1/logs", port)
 	desiredExporter := fmt.Sprintf(
 		`{ otlp-http = { endpoint = "%s", protocol = "json" } }`, endpoint)
 
 	var changes []string
-	for _, kv := range []struct{ key, value, desc string }{
-		{"environment", `"control-center"`, `otel.environment = "control-center"`},
-		{"metrics_exporter", `"none"`, `otel.metrics_exporter = "none"`},
-		{"trace_exporter", `"none"`, `otel.trace_exporter = "none"`},
-		{"log_user_prompt", "false", "otel.log_user_prompt = false"},
-	} {
-		var added bool
-		text, added = ensureTableKey(text, "otel", kv.key, kv.value)
-		if added {
-			changes = append(changes, kv.desc)
+	added := make(map[string]any)
+	for _, kv := range codexScalars {
+		var ok bool
+		text, ok = ensureTableKey(text, "otel", kv.key, kv.value)
+		if ok {
+			changes = append(changes, fmt.Sprintf("otel.%s = %s", kv.key, kv.value))
+			added[kv.key] = kv.want
 		}
 	}
 	var changed bool
@@ -90,16 +105,50 @@ func editCodex(text string, port int) (string, []string) {
 	if text != "" && !strings.HasSuffix(text, "\n") {
 		text += "\n"
 	}
-	return text, changes
+	return text, changes, added
 }
 
-// validateCodexTOML parses text with a real TOML parser. BurntSushi rejects
-// duplicate keys within a table (a TOML spec violation), so a nil error implies
-// both syntactic validity and no duplicate keys.
-func validateCodexTOML(text string) error {
+// verifyCodexEdit parses text and asserts the [otel] table holds every inserted
+// scalar with its intended value plus a correct exporter. A parse error (which
+// BurntSushi also raises on duplicate keys) or a missing/wrong value is
+// returned so the caller can refuse to write.
+func verifyCodexEdit(text string, port int, added map[string]any) error {
 	var doc map[string]any
-	_, err := toml.Decode(text, &doc)
-	return err
+	if _, err := toml.Decode(text, &doc); err != nil {
+		return fmt.Errorf("the change would produce invalid TOML (%w)", err)
+	}
+	otel, ok := doc["otel"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("the [otel] table is missing after the edit")
+	}
+	for key, want := range added {
+		if got, present := otel[key]; !present || !reflect.DeepEqual(got, want) {
+			return fmt.Errorf("[otel].%s did not land as expected (got %v, want %v)",
+				key, otel[key], want)
+		}
+	}
+	return assertCodexExporter(otel, port)
+}
+
+// assertCodexExporter checks the [otel].exporter inline table points at the
+// expected local endpoint over JSON.
+func assertCodexExporter(otel map[string]any, port int) error {
+	exporter, ok := otel["exporter"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("[otel].exporter is missing after the edit")
+	}
+	inner, ok := exporter["otlp-http"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("[otel].exporter.otlp-http is missing after the edit")
+	}
+	wantEndpoint := fmt.Sprintf("http://127.0.0.1:%d/v1/logs", port)
+	if inner["endpoint"] != wantEndpoint {
+		return fmt.Errorf("[otel].exporter endpoint = %v, want %s", inner["endpoint"], wantEndpoint)
+	}
+	if inner["protocol"] != "json" {
+		return fmt.Errorf("[otel].exporter protocol = %v, want json", inner["protocol"])
+	}
+	return nil
 }
 
 // Apply backs up the existing config.toml (if any) and writes the new contents.

@@ -407,11 +407,75 @@ func TestPlanCodexRemovesStaleTableRegardlessOfQuoting(t *testing.T) {
 	}
 }
 
-func TestValidateCodexTOMLRejectsDuplicateKeys(t *testing.T) {
-	if err := validateCodexTOML("[otel]\nx = 1\nx = 2\n"); err == nil {
-		t.Error("expected duplicate-key rejection")
+func TestVerifyCodexEditRejectsDuplicateKeys(t *testing.T) {
+	if err := verifyCodexEdit("[otel]\nx = 1\nx = 2\n", 8765, nil); err == nil {
+		t.Error("expected duplicate-key rejection (invalid TOML)")
 	}
-	if err := validateCodexTOML("[otel]\nx = 1\n"); err != nil {
-		t.Errorf("valid TOML rejected: %v", err)
+}
+
+func TestVerifyCodexEditAcceptsCorrectPlacement(t *testing.T) {
+	text := "[otel]\n" +
+		"environment = \"control-center\"\n" +
+		`exporter = { otlp-http = { endpoint = "http://127.0.0.1:8765/v1/logs", protocol = "json" } }` + "\n"
+	if err := verifyCodexEdit(text, 8765, map[string]any{"environment": "control-center"}); err != nil {
+		t.Errorf("correctly-placed edit rejected: %v", err)
+	}
+}
+
+func TestVerifyCodexEditRejectsMisplacedKey(t *testing.T) {
+	// environment landed in [other], not [otel]: the assertion must catch it.
+	text := "[otel]\n" +
+		`exporter = { otlp-http = { endpoint = "http://127.0.0.1:8765/v1/logs", protocol = "json" } }` + "\n" +
+		"[other]\n" +
+		"environment = \"control-center\"\n"
+	if err := verifyCodexEdit(text, 8765, map[string]any{"environment": "control-center"}); err == nil {
+		t.Error("expected refusal when an inserted key landed outside [otel]")
+	}
+}
+
+func TestVerifyCodexEditRejectsMissingExporter(t *testing.T) {
+	if err := verifyCodexEdit("[otel]\nenvironment = \"control-center\"\n", 8765, nil); err == nil {
+		t.Error("expected refusal when the exporter is absent")
+	}
+}
+
+func TestPlanCodexTripleQuotedStringNoSilentMisplacement(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(EnvCodexDir, dir)
+	path := filepath.Join(dir, "config.toml")
+	// The auditor's repro: a triple-quoted multi-line string with an unpaired
+	// '[' precedes a real [other] table. The scanner may misread structure, so
+	// the outcome must be correct placement in [otel] OR a clean refusal with
+	// the file untouched — never a silent write into the wrong table.
+	existing := "[otel]\n" +
+		"banner = \"\"\"\n" +
+		"a line with an unpaired [ bracket\n" +
+		"\"\"\"\n" +
+		"\n[other]\n" +
+		"foo = \"bar\"\n"
+	if err := os.WriteFile(path, []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := PlanCodex(8765)
+	if err != nil {
+		// Clean refusal: the file must be left exactly as it was.
+		if got := readFile(t, path); got != existing {
+			t.Errorf("refused but file was modified:\n%s", got)
+		}
+		return
+	}
+	if _, err := plan.Apply(); err != nil {
+		t.Fatal(err)
+	}
+	got := readFile(t, path)
+	doc := assertValidTOML(t, got)
+	otel, _ := doc["otel"].(map[string]any)
+	if otel["environment"] != "control-center" {
+		t.Errorf("keys were placed outside [otel] without a refusal:\n%s", got)
+	}
+	other, _ := doc["other"].(map[string]any)
+	if other["foo"] != "bar" {
+		t.Errorf("[other] table was corrupted:\n%s", got)
 	}
 }
