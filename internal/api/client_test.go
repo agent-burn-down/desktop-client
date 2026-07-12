@@ -84,7 +84,7 @@ func TestHeartbeatHappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	out, err := newTestClient(t, srv).Heartbeat(context.Background(), 123)
+	out, err := newTestClient(t, srv).Heartbeat(context.Background(), 123, nil)
 	if err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestAuth401NotRetried(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := newTestClient(t, srv).Heartbeat(context.Background(), 1)
+	_, err := newTestClient(t, srv).Heartbeat(context.Background(), 1, nil)
 	var authErr *AuthError
 	if !errors.As(err, &authErr) {
 		t.Fatalf("error = %v, want *AuthError", err)
@@ -165,7 +165,7 @@ func TestRetryOn500ThenSuccess(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	out, err := newTestClient(t, srv).Heartbeat(context.Background(), 1)
+	out, err := newTestClient(t, srv).Heartbeat(context.Background(), 1, nil)
 	if err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestRetryExhaustionOn500(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := newTestClient(t, srv).Heartbeat(context.Background(), 1)
+	_, err := newTestClient(t, srv).Heartbeat(context.Background(), 1, nil)
 	if err == nil {
 		t.Fatal("expected error after exhausting retries, got nil")
 	}
@@ -205,7 +205,7 @@ func TestNetworkErrorRetried(t *testing.T) {
 
 	c := NewClient(url, "yaahc_test_key")
 	c.sleep = func(time.Duration) {}
-	_, err := c.Heartbeat(context.Background(), 1)
+	_, err := c.Heartbeat(context.Background(), 1, nil)
 	if err == nil {
 		t.Fatal("expected network error, got nil")
 	}

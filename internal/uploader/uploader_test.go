@@ -17,6 +17,7 @@ import (
 	"github.com/agent-burn-down/desktop-client/internal/config"
 	"github.com/agent-burn-down/desktop-client/internal/counters"
 	"github.com/agent-burn-down/desktop-client/internal/queue"
+	"github.com/agent-burn-down/desktop-client/internal/version"
 )
 
 // mockBackend is an httptest handler standing in for the ingest API. It records
@@ -29,6 +30,10 @@ type mockBackend struct {
 	down           bool // events return 500 (unreachable / timeout path)
 	eventsAuthFail bool // events return 401
 	heartbeatFail  bool // heartbeat returns 401
+
+	// lastHeartbeat is the raw JSON body of the most recent heartbeat request,
+	// so tests can assert the optional self-telemetry counters it carries.
+	lastHeartbeat map[string]json.RawMessage
 }
 
 func newMockBackend() *mockBackend {
@@ -48,9 +53,12 @@ func (m *mockBackend) server(t *testing.T) *httptest.Server {
 	return srv
 }
 
-func (m *mockBackend) handleHeartbeat(w http.ResponseWriter, _ *http.Request) {
+func (m *mockBackend) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	var body map[string]json.RawMessage
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	m.lastHeartbeat = body
 	if m.heartbeatFail {
 		writeErr(w, http.StatusUnauthorized, "collector key revoked")
 		return
@@ -315,4 +323,53 @@ func (m *memStore) Save(c *config.Config) error {
 	cp := *c
 	m.saved = &cp
 	return nil
+}
+
+// TestHeartbeatCarriesSelfTelemetry proves the heartbeat request body includes
+// the optional "counters" object and that its values equal counters.Report over
+// the same registry snapshot and live queue depth that /healthz reports, i.e.
+// `status --json` and the heartbeat are a single source of truth.
+func TestHeartbeatCarriesSelfTelemetry(t *testing.T) {
+	mock := newMockBackend()
+	srv := mock.server(t)
+	up, q, reg := testDeps(t, mock, srv.URL)
+
+	reg.Set(counters.Received, 40)
+	reg.Set(counters.Filtered, 6)
+	reg.Set(counters.Uploaded, 30)
+	reg.Set(counters.UploadDropped, 2)
+	reg.Set(counters.Errors, 1)
+	reg.Set(counters.UploadErrors, 3)
+	reg.Set(counters.HeartbeatErrors, 1)
+	if err := q.Enqueue(markedEvents(5)); err != nil {
+		t.Fatal(err)
+	}
+
+	up.HeartbeatOnce(context.Background())
+
+	mock.mu.Lock()
+	raw, ok := mock.lastHeartbeat["counters"]
+	mock.mu.Unlock()
+	if !ok {
+		t.Fatalf("heartbeat body missing counters object: %v", mock.lastHeartbeat)
+	}
+	var got counters.Telemetry
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode telemetry: %v", err)
+	}
+
+	depth, _ := q.Depth()
+	snap := reg.Snapshot()
+	snap[counters.QueueDepth] = depth
+	want := counters.Report(snap, version.Version)
+	if got != want {
+		t.Fatalf("heartbeat telemetry %+v != /healthz-derived %+v", got, want)
+	}
+	// Spot-check the mapping the acceptance cares about.
+	if got.Received != 40 || got.Filtered != 6 || got.Uploaded != 30 {
+		t.Fatalf("pipeline counters wrong: %+v", got)
+	}
+	if got.Dropped != 2 || got.Errors != 5 || got.QueueDepth != 5 {
+		t.Fatalf("dropped/errors/depth wrong: %+v", got)
+	}
 }

@@ -83,7 +83,7 @@ func (d *Doctor) checkHeartbeat(ctx context.Context, cfg *config.Config, cfgErr 
 	if cfgErr != nil || cfg.CollectorKey == "" || cfg.CollectorID == 0 {
 		return fail("heartbeat", "collector not registered", loginHint)
 	}
-	_, err := d.apiClient(cfg).Heartbeat(ctx, cfg.CollectorID)
+	_, err := d.apiClient(cfg).Heartbeat(ctx, cfg.CollectorID, nil)
 	if err == nil {
 		return pass("heartbeat", fmt.Sprintf("ok (collector_id %d)", cfg.CollectorID))
 	}

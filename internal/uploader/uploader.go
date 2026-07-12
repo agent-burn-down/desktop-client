@@ -11,6 +11,7 @@ import (
 	"github.com/agent-burn-down/desktop-client/internal/config"
 	"github.com/agent-burn-down/desktop-client/internal/counters"
 	"github.com/agent-burn-down/desktop-client/internal/queue"
+	"github.com/agent-burn-down/desktop-client/internal/version"
 )
 
 const (
@@ -161,7 +162,8 @@ func (u *Uploader) handleSendError(err error) {
 // HeartbeatOnce reports liveness and swaps in any refreshed policy. A 401
 // leaves flushing paused; a success re-enables it.
 func (u *Uploader) HeartbeatOnce(ctx context.Context) {
-	out, err := u.client.Heartbeat(ctx, u.collectorID)
+	tel := u.telemetry()
+	out, err := u.client.Heartbeat(ctx, u.collectorID, &tel)
 	if err != nil {
 		var authErr *api.AuthError
 		if errors.As(err, &authErr) {
@@ -173,6 +175,18 @@ func (u *Uploader) HeartbeatOnce(ctx context.Context) {
 		return
 	}
 	u.onHeartbeatOK(out.Policy)
+}
+
+// telemetry builds the self-telemetry snapshot sent with each heartbeat. It
+// merges the shared counters registry with the live queue depth and derives the
+// reported shape via counters.Report, the same path `status --json` uses over
+// /healthz, so the two always agree.
+func (u *Uploader) telemetry() counters.Telemetry {
+	snap := u.counters.Snapshot()
+	if depth, err := u.queue.Depth(); err == nil {
+		snap[counters.QueueDepth] = depth
+	}
+	return counters.Report(snap, version.Version)
 }
 
 func (u *Uploader) onHeartbeatOK(policy api.Policy) {

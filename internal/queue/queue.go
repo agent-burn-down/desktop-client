@@ -11,7 +11,9 @@ package queue
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -27,7 +29,17 @@ const (
 	defaultMaxRows  int64 = 50_000
 	defaultMaxBytes int64 = 100 * 1024 * 1024
 	evictChunk      int64 = 512
-	timeLayout            = time.RFC3339Nano
+	// timeLayout is a FIXED-WIDTH UTC layout used for every TEXT timestamp the
+	// queue writes (created_at, acked_at, leased_until) and every cutoff it
+	// compares against in SQL. It must stay fixed-width: time.RFC3339Nano trims
+	// trailing fractional zeros, so ".1Z" and ".12Z" sort lexicographically
+	// opposite to chronological order, silently corrupting SQLite TEXT range
+	// comparisons (lease expiry, retention prune, stats window). A full 9-digit
+	// fraction keeps string order == time order. Always format after .UTC() so
+	// the zone suffix is always "Z" and every value shares one timeline.
+	timeLayout = "2006-01-02T15:04:05.000000000Z07:00"
+	// DefaultTopTools is the number of tool_name rows returned by StatsSince.
+	DefaultTopTools = 10
 )
 
 // Options configures queue capacity caps. Zero values fall back to defaults
@@ -93,6 +105,25 @@ func Open(path string, opts Options) (*Queue, error) {
 		return nil, err
 	}
 	return q, nil
+}
+
+// OpenReadOnly opens an existing queue database read-only for the stats reader.
+// It does not create or migrate the schema and never takes a write lock, so it
+// is safe to run concurrently with the daemon under WAL. A missing database
+// yields an error satisfying errors.Is(err, os.ErrNotExist).
+func OpenReadOnly(path string) (*Queue, error) {
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("queue db %s: %w", path, os.ErrNotExist)
+		}
+		return nil, fmt.Errorf("stat queue db %s: %w", path, err)
+	}
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	if err != nil {
+		return nil, fmt.Errorf("open queue db %s read-only: %w", path, err)
+	}
+	db.SetMaxOpenConns(1)
+	return &Queue{db: db, maxRows: defaultMaxRows, maxBytes: defaultMaxBytes}, nil
 }
 
 // Close closes the underlying database.
@@ -265,6 +296,31 @@ func (q *Queue) Nack(ids []int64) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return q.updateByIDs("state='pending', leased_until=NULL, attempts=attempts+1", nil, ids)
+}
+
+// PruneAcked deletes acked rows whose acked_at is older than cutoff and, when
+// any were removed, reclaims freed pages via incremental vacuum so the on-disk
+// file stays bounded. Pending and leased rows are never touched. It returns the
+// number of rows deleted.
+func (q *Queue) PruneAcked(cutoff time.Time) (int64, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	res, err := q.db.Exec(
+		"DELETE FROM queue WHERE state='acked' AND acked_at IS NOT NULL AND acked_at < ?",
+		cutoff.UTC().Format(timeLayout))
+	if err != nil {
+		return 0, fmt.Errorf("prune acked rows: %w", err)
+	}
+	deleted, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("prune rows affected: %w", err)
+	}
+	if deleted > 0 {
+		if _, err := q.db.Exec("PRAGMA incremental_vacuum"); err != nil {
+			return deleted, fmt.Errorf("incremental vacuum after prune: %w", err)
+		}
+	}
+	return deleted, nil
 }
 
 // Depth returns the number of outstanding (not-yet-acked) rows.

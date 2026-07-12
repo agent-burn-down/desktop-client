@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/agent-burn-down/desktop-client/internal/config"
+	"github.com/agent-burn-down/desktop-client/internal/counters"
+	"github.com/agent-burn-down/desktop-client/internal/version"
 )
 
 // serverPort extracts the numeric port an httptest server is bound to.
@@ -81,6 +83,18 @@ func TestStatusDaemonUpJSON(t *testing.T) {
 	}
 	if report.Counters["received"] != 10 {
 		t.Errorf("counters not surfaced: %+v", report.Counters)
+	}
+	// status --json telemetry must match what the heartbeat reports: both derive
+	// from counters.Report over the same /healthz snapshot.
+	if report.Telemetry == nil {
+		t.Fatal("telemetry missing from status json")
+	}
+	want := counters.Report(report.Counters, version.Version)
+	if *report.Telemetry != want {
+		t.Errorf("telemetry %+v != Report(counters) %+v", *report.Telemetry, want)
+	}
+	if report.Telemetry.Received != 10 || report.Telemetry.QueueDepth != 3 {
+		t.Errorf("telemetry values wrong: %+v", *report.Telemetry)
 	}
 }
 
