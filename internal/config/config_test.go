@@ -182,3 +182,29 @@ func keys(m map[string]json.RawMessage) []string {
 	}
 	return out
 }
+
+func TestRetentionDefaultAndOverride(t *testing.T) {
+	if got := (&Config{}).Retention(); got != DefaultRetentionDays {
+		t.Errorf("default retention = %d, want %d", got, DefaultRetentionDays)
+	}
+	if got := (&Config{RetentionDays: -3}).Retention(); got != DefaultRetentionDays {
+		t.Errorf("negative retention = %d, want default %d", got, DefaultRetentionDays)
+	}
+	if got := (&Config{RetentionDays: 14}).Retention(); got != 14 {
+		t.Errorf("retention = %d, want 14", got)
+	}
+}
+
+func TestRetentionDaysRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Save(&Config{Machine: "m", RetentionDays: 30}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := s.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.RetentionDays != 30 {
+		t.Errorf("retention_days round-trip = %d, want 30", got.RetentionDays)
+	}
+}

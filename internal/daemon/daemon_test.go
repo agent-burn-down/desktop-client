@@ -298,3 +298,44 @@ func derefI64(p *int64) int64 {
 	}
 	return *p
 }
+
+// TestRetentionWiring proves the daemon takes its prune window from config and
+// that pruneOnce leaves recent acked rows intact (deletion correctness itself is
+// covered by the queue package's prune and soak tests).
+func TestRetentionWiring(t *testing.T) {
+	mock := &backendMock{policy: api.Policy{FlushIntervalSeconds: 30}}
+	srv := mock.server(t)
+	dir := t.TempDir()
+	t.Setenv(config.EnvConfigDir, dir)
+	cfg := &config.Config{
+		APIURL: srv.URL, CollectorKey: "yaahc_test", CollectorID: 1,
+		Policy: mock.policy, RetentionDays: 3,
+	}
+	store, _ := config.NewFileStore()
+	_ = store.Save(cfg)
+	d, err := New(Options{Config: cfg, Store: store, Port: freePort(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.close() }()
+
+	if d.retentionDays != 3 {
+		t.Fatalf("retentionDays = %d, want 3 (from config)", d.retentionDays)
+	}
+	if err := d.queue.Enqueue(sampleEvents(4)); err != nil {
+		t.Fatal(err)
+	}
+	items, _ := d.queue.LeaseBatch(4, time.Minute)
+	ids := make([]int64, len(items))
+	for i, it := range items {
+		ids[i] = it.ID
+	}
+	if err := d.queue.Ack(ids); err != nil {
+		t.Fatal(err)
+	}
+	d.pruneOnce() // recent acked rows are inside the window: nothing removed
+	s, _ := d.queue.Stats()
+	if s.Acked != 4 {
+		t.Fatalf("acked after prune = %d, want 4 (recent rows kept)", s.Acked)
+	}
+}

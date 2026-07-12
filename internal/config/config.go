@@ -30,7 +30,12 @@ var knownFields = map[string]struct{}{
 	"machine":        {},
 	"policy":         {},
 	"key_expires_at": {},
+	"retention_days": {},
 }
+
+// DefaultRetentionDays is the retention window applied when retention_days is
+// unset or non-positive: acked queue rows older than this are pruned locally.
+const DefaultRetentionDays = 7
 
 // Config is the persisted collector configuration.
 //
@@ -45,6 +50,9 @@ type Config struct {
 	Policy       api.Policy `json:"policy"`
 	// KeyExpiresAt is reserved for M2 key rotation; unused today.
 	KeyExpiresAt string `json:"key_expires_at"`
+	// RetentionDays bounds how long acked queue rows are kept for local stats.
+	// Zero or negative means use DefaultRetentionDays; read via Retention.
+	RetentionDays int `json:"retention_days"`
 
 	// extra holds JSON fields not represented by the typed fields above, so
 	// they survive a load/save round-trip.
@@ -93,6 +101,15 @@ func (c *Config) MarshalJSON() ([]byte, error) {
 		merged[k] = v
 	}
 	return json.Marshal(merged)
+}
+
+// Retention returns the local retention window in days, falling back to
+// DefaultRetentionDays when unset or non-positive.
+func (c *Config) Retention() int {
+	if c.RetentionDays <= 0 {
+		return DefaultRetentionDays
+	}
+	return c.RetentionDays
 }
 
 // Store abstracts loading and saving collector configuration so a future

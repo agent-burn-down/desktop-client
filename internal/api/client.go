@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/agent-burn-down/desktop-client/internal/counters"
 	"github.com/agent-burn-down/desktop-client/internal/version"
 )
 
@@ -108,9 +109,17 @@ func (c *Client) Register(ctx context.Context, machine, userEmail string) (*Regi
 }
 
 // Heartbeat reports liveness for the given collector and returns the current
-// policy.
-func (c *Client) Heartbeat(ctx context.Context, collectorID int64) (*HeartbeatOut, error) {
+// policy. When tel is non-nil its values are attached as an optional "counters"
+// object (collector self-telemetry). The backend ignores unknown request
+// fields today, so sending it is safe pre-deploy; a follow-up backend issue
+// tracks persisting/displaying it. See the ingest contract, §2.2.
+func (c *Client) Heartbeat(
+	ctx context.Context, collectorID int64, tel *counters.Telemetry,
+) (*HeartbeatOut, error) {
 	body := map[string]any{"collector_id": collectorID}
+	if tel != nil {
+		body["counters"] = tel
+	}
 	var out HeartbeatOut
 	if err := c.postJSON(ctx, "/ingest/v1/heartbeat", body, &out); err != nil {
 		return nil, err

@@ -6,6 +6,7 @@
 package daemon
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"sync"
@@ -29,6 +30,9 @@ const (
 	drainTimeout = 5 * time.Second
 	// finalFlushTimeout bounds the best-effort final upload on shutdown.
 	finalFlushTimeout = 10 * time.Second
+	// retentionInterval is how often acked rows older than the retention window
+	// are pruned while the daemon runs; a prune also happens once at startup.
+	retentionInterval = time.Hour
 )
 
 // Options configures a Daemon. Config and Store are required.
@@ -50,6 +54,8 @@ type Daemon struct {
 	logger   *slog.Logger
 	logFile  io.Closer
 	repo     string
+
+	retentionDays int
 
 	rollupMu   sync.Mutex
 	lastRollup time.Time
@@ -84,13 +90,14 @@ func assemble(opts Options, dir string, logger *slog.Logger, logFile io.Closer) 
 	cfg := opts.Config
 	client := api.NewClient(cfg.APIURL, cfg.CollectorKey)
 	d := &Daemon{
-		queue:      q,
-		filter:     filter.New(nil, nil),
-		counters:   reg,
-		logger:     logger,
-		logFile:    logFile,
-		repo:       opts.Repo,
-		lastRollup: time.Now(),
+		queue:         q,
+		filter:        filter.New(nil, nil),
+		counters:      reg,
+		logger:        logger,
+		logFile:       logFile,
+		repo:          opts.Repo,
+		retentionDays: cfg.Retention(),
+		lastRollup:    time.Now(),
 	}
 	d.uploader = uploader.New(uploader.Config{
 		Client: client, Queue: q, Store: opts.Store, Counters: reg,
@@ -162,6 +169,37 @@ func (d *Daemon) countersSnapshot() map[string]int64 {
 		snap[counters.QueueDepth] = depth
 	}
 	return snap
+}
+
+// runRetention prunes acked rows older than the retention window once at
+// startup and then every retentionInterval until ctx is cancelled.
+func (d *Daemon) runRetention(ctx context.Context) {
+	d.pruneOnce()
+	ticker := time.NewTicker(retentionInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			d.pruneOnce()
+		}
+	}
+}
+
+// pruneOnce deletes acked rows older than the retention window, keeping the
+// local stats database bounded. Failures are logged, not fatal.
+func (d *Daemon) pruneOnce() {
+	cutoff := time.Now().Add(-time.Duration(d.retentionDays) * 24 * time.Hour)
+	deleted, err := d.queue.PruneAcked(cutoff)
+	if err != nil {
+		d.logger.Error("retention prune failed", "err", err)
+		return
+	}
+	if deleted > 0 {
+		d.logger.Info("retention pruned acked rows",
+			"deleted", deleted, "retention_days", d.retentionDays)
+	}
 }
 
 // ReceiverAddr returns the receiver's bound address (useful when Port is 0).

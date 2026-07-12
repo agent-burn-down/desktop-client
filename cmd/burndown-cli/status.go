@@ -11,6 +11,7 @@ import (
 	"github.com/agent-burn-down/desktop-client/internal/config"
 	"github.com/agent-burn-down/desktop-client/internal/counters"
 	"github.com/agent-burn-down/desktop-client/internal/receiver"
+	"github.com/agent-burn-down/desktop-client/internal/version"
 )
 
 // newStatusCmd builds the `status` command: report daemon liveness (by probing
@@ -34,13 +35,18 @@ func newStatusCmd() *cobra.Command {
 }
 
 // statusReport is the machine-readable status shape emitted with --json.
+//
+// Telemetry is the same self-telemetry the daemon sends in its heartbeat,
+// derived from the live /healthz snapshot via counters.Report, so `status
+// --json` and the heartbeat always report identical counter values.
 type statusReport struct {
-	DaemonUp    bool             `json:"daemon_up"`
-	APIURL      string           `json:"api_url"`
-	Machine     string           `json:"machine"`
-	KeyPrefix   string           `json:"key_prefix"`
-	CollectorID int64            `json:"collector_id"`
-	Counters    map[string]int64 `json:"counters,omitempty"`
+	DaemonUp    bool                `json:"daemon_up"`
+	APIURL      string              `json:"api_url"`
+	Machine     string              `json:"machine"`
+	KeyPrefix   string              `json:"key_prefix"`
+	CollectorID int64               `json:"collector_id"`
+	Counters    map[string]int64    `json:"counters,omitempty"`
+	Telemetry   *counters.Telemetry `json:"telemetry,omitempty"`
 }
 
 func runStatus(cmd *cobra.Command, port int, asJSON bool) error {
@@ -54,6 +60,8 @@ func runStatus(cmd *cobra.Command, port int, asJSON bool) error {
 	if hz, err := probeHealthz(cmd.Context(), port); err == nil {
 		report.DaemonUp = true
 		report.Counters = hz.Counters
+		tel := counters.Report(hz.Counters, version.Version)
+		report.Telemetry = &tel
 	}
 	if asJSON {
 		return writeJSONReport(cmd.OutOrStdout(), report)

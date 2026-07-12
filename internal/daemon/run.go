@@ -11,10 +11,14 @@ import (
 func (d *Daemon) Run(ctx context.Context) error {
 	d.logger.Info("collector started", "addr", d.receiver.Addr())
 	var wg sync.WaitGroup
-	wg.Add(1)
+	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		d.uploader.Run(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		d.runRetention(ctx)
 	}()
 	<-ctx.Done()
 	d.logger.Info("shutdown signal received; draining")
