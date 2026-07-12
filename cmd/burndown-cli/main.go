@@ -4,6 +4,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -14,6 +15,10 @@ import (
 
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
+		var exit *exitError
+		if errors.As(err, &exit) {
+			os.Exit(exit.Code())
+		}
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -37,5 +42,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newStatusCmd())
 	root.AddCommand(newSendTestCmd())
 	root.AddCommand(newSetupCmd())
+	root.AddCommand(newServiceCmd())
+	root.AddCommand(newDoctorCmd())
 	return root
 }
