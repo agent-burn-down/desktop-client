@@ -88,7 +88,7 @@ func assemble(opts Options, dir string, logger *slog.Logger, logFile io.Closer) 
 	}
 	reg := counters.New()
 	cfg := opts.Config
-	client := api.NewClient(cfg.APIURL, cfg.CollectorKey)
+	client := api.NewClient(cfg.APIURL, cfg.CollectorKey, api.WithLogger(logger))
 	d := &Daemon{
 		queue:         q,
 		filter:        filter.New(nil, nil),
