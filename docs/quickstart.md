@@ -16,7 +16,7 @@ cp bin/burndown-cli /usr/local/bin/
 ## 1. Get a collector key
 
 Sign in to [app.agentburndown.com](https://app.agentburndown.com) and create a
-collector key. It looks like `yaahc_...`.
+collector key. It looks like `abd_...`.
 
 ## 2. Log in
 
@@ -31,15 +31,15 @@ burndown-cli login
 
 ```
 Reporting user email: you@example.com
-Collector key (yaahc_...):
-Logged in. key yaahc_a1b2c3d4… collector_id 1 machine your-hostname
+Collector key (abd_...):
+Logged in. key abd_a1b2c3d4… collector_id 1 machine your-hostname
 ```
 
 Pass values as flags to skip the prompts (useful for CI, where the key can also
 be piped on stdin):
 
 ```
-burndown-cli login --email you@example.com --key yaahc_... --machine your-hostname
+burndown-cli login --email you@example.com --key abd_... --machine your-hostname
 ```
 
 Override the backend with `--api-url` if you are pointing at a non-default
