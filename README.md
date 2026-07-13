@@ -69,7 +69,7 @@ A fresh machine goes from nothing to a running collector in five steps.
 ### 1. Get a collector key
 
 Sign in to [app.agentburndown.com](https://app.agentburndown.com) and create a
-collector key. It looks like `yaahc_...`.
+collector key. It looks like `abd_...`.
 
 ### 2. Log in
 
@@ -83,14 +83,14 @@ burndown-cli login
 
 ```
 Reporting user email: you@example.com
-Collector key (yaahc_...):
-Logged in. key yaahc_a1b2c3d4… collector_id 1 machine your-hostname
+Collector key (abd_...):
+Logged in. key abd_a1b2c3d4… collector_id 1 machine your-hostname
 ```
 
 You can pass the values as flags instead of being prompted:
 
 ```
-burndown-cli login --email you@example.com --key yaahc_...
+burndown-cli login --email you@example.com --key abd_...
 ```
 
 ### 3. Configure your agents
