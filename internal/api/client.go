@@ -90,10 +90,13 @@ type HeartbeatOut struct {
 	KeyExpiresAt *string `json:"key_expires_at"`
 }
 
-// Counts is the accepted/dropped tally returned by POST /ingest/v1/events.
+// Counts is the accepted/dropped/duplicates tally returned by POST
+// /ingest/v1/events. Duplicates counts events the backend deduped by event_id
+// within its window (a legacy server omitting the field decodes it as 0).
 type Counts struct {
-	Accepted int `json:"accepted"`
-	Dropped  int `json:"dropped"`
+	Accepted   int `json:"accepted"`
+	Dropped    int `json:"dropped"`
+	Duplicates int `json:"duplicates"`
 }
 
 // Client is a typed HTTP client for the backend ingest API.

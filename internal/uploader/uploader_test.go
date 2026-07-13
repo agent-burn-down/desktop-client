@@ -48,6 +48,11 @@ type mockBackend struct {
 	eventsAuthFail bool // events return 401
 	heartbeatFail  bool // heartbeat returns 401
 
+	// dedupeSeen tracks event_ids already accepted, mirroring the backend's
+	// per-org dedupe window (yaah-hosted#24): a replayed event_id is counted as
+	// a duplicate instead of being recorded again.
+	dedupeSeen map[string]bool
+
 	// lastHeartbeat is the raw JSON body of the most recent heartbeat request,
 	// so tests can assert the optional self-telemetry counters it carries.
 	lastHeartbeat map[string]json.RawMessage
@@ -131,12 +136,24 @@ func (m *mockBackend) handleEvents(w http.ResponseWriter, r *http.Request) {
 		Events []api.NormalizedEvent `json:"events"`
 	}
 	_ = json.NewDecoder(requestBody(r)).Decode(&req)
+	if m.dedupeSeen == nil {
+		m.dedupeSeen = make(map[string]bool)
+	}
+	var accepted, duplicates int
 	for _, ev := range req.Events {
+		if ev.EventID != nil {
+			if m.dedupeSeen[*ev.EventID] {
+				duplicates++
+				continue
+			}
+			m.dedupeSeen[*ev.EventID] = true
+		}
+		accepted++
 		if ev.SessionID != nil {
 			m.recorded[*ev.SessionID]++
 		}
 	}
-	_ = json.NewEncoder(w).Encode(api.Counts{Accepted: len(req.Events)})
+	_ = json.NewEncoder(w).Encode(api.Counts{Accepted: accepted, Duplicates: duplicates})
 }
 
 func (m *mockBackend) handleRotate(w http.ResponseWriter, r *http.Request) {
@@ -257,6 +274,63 @@ func TestZeroLossNoDuplicates(t *testing.T) {
 	}
 	if dupes != 0 {
 		t.Fatalf("%d events delivered more than once; expected exactly-once", dupes)
+	}
+}
+
+// TestReplayDedupedByEventID proves a crash-after-send-before-ack replay is not
+// double-counted: the queue never re-mints event_id across leases (issue #20),
+// so when a delivered batch never gets acked and is later re-leased and
+// resent, the backend's event_id dedupe (simulated by mockBackend) recognizes
+// the replay and neither the accepted count nor the recorded events double.
+func TestReplayDedupedByEventID(t *testing.T) {
+	mock := newMockBackend()
+	srv := mock.server(t)
+	up, q, _ := testDeps(t, mock, srv.URL)
+	ctx := context.Background()
+
+	const total = 10
+	if err := q.Enqueue(markedEvents(total)); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := q.LeaseBatch(total, leaseDuration)
+	if err != nil || len(items) != total {
+		t.Fatalf("LeaseBatch: %v (got %d items)", err, len(items))
+	}
+	ids, events := split(items)
+	counts, err := up.client.SendEvents(ctx, up.collectorID, events)
+	if err != nil {
+		t.Fatalf("first SendEvents: %v", err)
+	}
+	if counts.Accepted != total || counts.Duplicates != 0 {
+		t.Fatalf("first send counts = %+v, want accepted=%d duplicates=0", counts, total)
+	}
+
+	// Simulate a crash after the backend recorded the batch but before the
+	// queue Ack landed: the row never acks, so it becomes leasable again.
+	if err := q.Nack(ids); err != nil {
+		t.Fatalf("Nack: %v", err)
+	}
+
+	replayItems, err := q.LeaseBatch(total, leaseDuration)
+	if err != nil || len(replayItems) != total {
+		t.Fatalf("replay LeaseBatch: %v (got %d items)", err, len(replayItems))
+	}
+	_, replayEvents := split(replayItems)
+	replayCounts, err := up.client.SendEvents(ctx, up.collectorID, replayEvents)
+	if err != nil {
+		t.Fatalf("replay SendEvents: %v", err)
+	}
+	if replayCounts.Accepted != 0 || replayCounts.Duplicates != total {
+		t.Fatalf("replay counts = %+v, want accepted=0 duplicates=%d", replayCounts, total)
+	}
+
+	unique, dupes := mock.uniqueDelivered()
+	if unique != total {
+		t.Fatalf("delivered %d unique events, want %d", unique, total)
+	}
+	if dupes != 0 {
+		t.Fatalf("%d events recorded more than once; replay must not double-count", dupes)
 	}
 }
 

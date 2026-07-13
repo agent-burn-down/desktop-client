@@ -141,6 +141,36 @@ func TestSendEventsHappyPath(t *testing.T) {
 	}
 }
 
+// TestSendEventsCarriesEventID proves the event_id idempotency key set on a
+// NormalizedEvent reaches the wire, and that a duplicates count in the
+// response decodes onto Counts.
+func TestSendEventsCarriesEventID(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody = decodeBody(t, r)
+		_, _ = io.WriteString(w, `{"accepted":1,"dropped":0,"duplicates":1}`)
+	}))
+	defer srv.Close()
+
+	id := "01977f2e-0000-7000-8000-000000000001"
+	events := []NormalizedEvent{{EventID: &id}}
+	out, err := newTestClient(t, srv).SendEvents(context.Background(), 1, events)
+	if err != nil {
+		t.Fatalf("SendEvents: %v", err)
+	}
+	if out.Duplicates != 1 {
+		t.Errorf("duplicates = %d, want 1", out.Duplicates)
+	}
+	evs, ok := gotBody["events"].([]any)
+	if !ok || len(evs) != 1 {
+		t.Fatalf("events = %v, want 1 element", gotBody["events"])
+	}
+	first := evs[0].(map[string]any)
+	if first["event_id"] != id {
+		t.Errorf("event_id = %v, want %q", first["event_id"], id)
+	}
+}
+
 func TestAuth401NotRetried(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

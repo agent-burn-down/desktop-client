@@ -8,7 +8,7 @@ import (
 // allEventKeys is the exact set of keys the wire contract requires on every
 // emitted event.
 var allEventKeys = []string{
-	"event_name", "timestamp", "session_id", "model", "tool_name",
+	"event_id", "event_name", "timestamp", "session_id", "model", "tool_name",
 	"tool_success", "tool_duration_ms", "cost_usd", "input_tokens",
 	"output_tokens", "cache_read_tokens", "cache_create_tokens", "repo",
 	"error_message",
