@@ -104,6 +104,10 @@ func Open(path string, opts Options) (*Queue, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := q.initMetrics(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return q, nil
 }
 
@@ -259,15 +263,16 @@ func scanItem(rows *sql.Rows) (Item, error) {
 }
 
 func (q *Queue) markLeased(ids []int64, until string) error {
-	return q.updateByIDs("state='leased', leased_until=?", []any{until}, ids)
+	return q.updateByIDs("queue", "state='leased', leased_until=?", []any{until}, ids)
 }
 
-// updateByIDs runs "UPDATE queue SET <setClause> WHERE id IN (...)" with the
-// leading SET-clause args followed by the row ids.
-func (q *Queue) updateByIDs(setClause string, leadingArgs []any, ids []int64) error {
+// updateByIDs runs "UPDATE <table> SET <setClause> WHERE id IN (...)" with the
+// leading SET-clause args followed by the row ids. table is always a fixed
+// internal literal ("queue" or "metrics_queue"), never caller/user input.
+func (q *Queue) updateByIDs(table, setClause string, leadingArgs []any, ids []int64) error {
 	in := placeholders(len(ids))
 	//nolint:gosec // G202: only "?" bind markers are concatenated; values bind separately
-	query := "UPDATE queue SET " + setClause + " WHERE id IN (" + in + ")"
+	query := "UPDATE " + table + " SET " + setClause + " WHERE id IN (" + in + ")"
 	args := append(append([]any{}, leadingArgs...), idArgs(ids)...)
 	if _, err := q.db.Exec(query, args...); err != nil {
 		return fmt.Errorf("update rows: %w", err)
@@ -284,7 +289,7 @@ func (q *Queue) Ack(ids []int64) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	now := time.Now().UTC().Format(timeLayout)
-	return q.updateByIDs("state='acked', acked_at=?, leased_until=NULL", []any{now}, ids)
+	return q.updateByIDs("queue", "state='acked', acked_at=?, leased_until=NULL", []any{now}, ids)
 }
 
 // Nack clears the lease and increments the attempt count so the rows become
@@ -295,7 +300,7 @@ func (q *Queue) Nack(ids []int64) error {
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return q.updateByIDs("state='pending', leased_until=NULL, attempts=attempts+1", nil, ids)
+	return q.updateByIDs("queue", "state='pending', leased_until=NULL, attempts=attempts+1", nil, ids)
 }
 
 // PruneAcked deletes acked rows whose acked_at is older than cutoff and, when

@@ -48,6 +48,11 @@ type mockBackend struct {
 	eventsAuthFail bool // events return 401
 	heartbeatFail  bool // heartbeat returns 401
 
+	// recordedMetrics counts accepted points by metric_name, mirroring
+	// recorded for events.
+	recordedMetrics map[string]int
+	metricsPosts    int
+
 	// dedupeSeen tracks event_ids already accepted, mirroring the backend's
 	// per-org dedupe window (yaah-hosted#24): a replayed event_id is counted as
 	// a duplicate instead of being recorded again.
@@ -87,8 +92,9 @@ func acceptsKey(accepted map[string]bool, r *http.Request) bool {
 
 func newMockBackend() *mockBackend {
 	return &mockBackend{
-		recorded: make(map[string]int),
-		policy:   api.Policy{FlushIntervalSeconds: 30, MaxBatchSize: 50},
+		recorded:        make(map[string]int),
+		recordedMetrics: make(map[string]int),
+		policy:          api.Policy{FlushIntervalSeconds: 30, MaxBatchSize: 50},
 	}
 }
 
@@ -97,6 +103,7 @@ func (m *mockBackend) server(t *testing.T) *httptest.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ingest/v1/heartbeat", m.handleHeartbeat)
 	mux.HandleFunc("/ingest/v1/events", m.handleEvents)
+	mux.HandleFunc("/ingest/v1/metrics", m.handleMetrics)
 	mux.HandleFunc("/ingest/v1/keys/rotate", m.handleRotate)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -154,6 +161,28 @@ func (m *mockBackend) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_ = json.NewEncoder(w).Encode(api.Counts{Accepted: accepted, Duplicates: duplicates})
+}
+
+func (m *mockBackend) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.metricsPosts++
+	if m.eventsAuthFail || !acceptsKey(m.acceptedKeys, r) {
+		m.writeAuthReject(w, "invalid collector key")
+		return
+	}
+	if m.down {
+		writeErr(w, http.StatusInternalServerError, "boom")
+		return
+	}
+	var req struct {
+		Points []api.MetricPoint `json:"points"`
+	}
+	_ = json.NewDecoder(requestBody(r)).Decode(&req)
+	for _, p := range req.Points {
+		m.recordedMetrics[p.MetricName]++
+	}
+	_ = json.NewEncoder(w).Encode(api.Counts{Accepted: len(req.Points)})
 }
 
 func (m *mockBackend) handleRotate(w http.ResponseWriter, r *http.Request) {
@@ -274,6 +303,44 @@ func TestZeroLossNoDuplicates(t *testing.T) {
 	}
 	if dupes != 0 {
 		t.Fatalf("%d events delivered more than once; expected exactly-once", dupes)
+	}
+}
+
+// TestFlushMetricsOnceDrainsQueueToBackend proves metric points enqueued via
+// EnqueueMetrics reach the backend through the same flush/ack machinery as
+// events (issue #21).
+func TestFlushMetricsOnceDrainsQueueToBackend(t *testing.T) {
+	mock := newMockBackend()
+	srv := mock.server(t)
+	up, q, _ := testDeps(t, mock, srv.URL)
+
+	points := []api.MetricPoint{
+		{MetricName: "claude_code.commit.count", Value: 1},
+		{MetricName: "claude_code.commit.count", Value: 1},
+		{MetricName: "claude_code.cost.usage", Value: 0.05},
+	}
+	if err := q.EnqueueMetrics(points); err != nil {
+		t.Fatal(err)
+	}
+	up.FlushMetricsOnce(context.Background())
+
+	depth, err := q.LeaseMetricsBatch(10, leaseDuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(depth) != 0 {
+		t.Fatalf("metrics queue not drained: %d rows still leasable", len(depth))
+	}
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	if mock.recordedMetrics["claude_code.commit.count"] != 2 {
+		t.Errorf("commit.count delivered = %d, want 2", mock.recordedMetrics["claude_code.commit.count"])
+	}
+	if mock.recordedMetrics["claude_code.cost.usage"] != 1 {
+		t.Errorf("cost.usage delivered = %d, want 1", mock.recordedMetrics["claude_code.cost.usage"])
+	}
+	if mock.metricsPosts != 1 {
+		t.Errorf("metrics posts = %d, want 1 (one batch)", mock.metricsPosts)
 	}
 }
 

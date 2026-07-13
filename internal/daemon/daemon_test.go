@@ -21,6 +21,7 @@ import (
 type backendMock struct {
 	mu       sync.Mutex
 	events   []api.NormalizedEvent
+	metrics  []api.MetricPoint
 	policy   api.Policy
 	downEvts bool
 }
@@ -47,6 +48,16 @@ func (b *backendMock) server(t *testing.T) *httptest.Server {
 		b.events = append(b.events, req.Events...)
 		_ = json.NewEncoder(w).Encode(api.Counts{Accepted: len(req.Events)})
 	})
+	mux.HandleFunc("/ingest/v1/metrics", func(w http.ResponseWriter, r *http.Request) {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		var req struct {
+			Points []api.MetricPoint `json:"points"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		b.metrics = append(b.metrics, req.Points...)
+		_ = json.NewEncoder(w).Encode(api.Counts{Accepted: len(req.Points)})
+	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
@@ -56,6 +67,12 @@ func (b *backendMock) delivered() []api.NormalizedEvent {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return append([]api.NormalizedEvent(nil), b.events...)
+}
+
+func (b *backendMock) deliveredMetrics() []api.MetricPoint {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]api.MetricPoint(nil), b.metrics...)
 }
 
 // otlpFixture is a realistic OTLP/HTTP logs payload: one api_request, one
@@ -89,6 +106,48 @@ func otlpFixture() map[string]any {
 			"logRecords": []any{apiReq, toolUse, noise},
 		}},
 	}}}
+}
+
+// otlpMetricsFixture is a realistic OTLP/HTTP metrics payload: two
+// allowlisted Claude Code counters (commit.count, cost.usage) and one
+// unrecognized metric name that must be counted and dropped, never uploaded.
+func otlpMetricsFixture() map[string]any {
+	dataPoint := func(v any) map[string]any {
+		return map[string]any{"asInt": v}
+	}
+	return map[string]any{"resourceMetrics": []any{map[string]any{
+		"scopeMetrics": []any{map[string]any{
+			"metrics": []any{
+				map[string]any{
+					"name": "claude_code.commit.count",
+					"sum":  map[string]any{"dataPoints": []any{dataPoint("1")}},
+				},
+				map[string]any{
+					"name": "claude_code.cost.usage",
+					"gauge": map[string]any{
+						"dataPoints": []any{map[string]any{"asDouble": "0.05"}},
+					},
+				},
+				map[string]any{
+					"name": "some.unrecognized.metric",
+					"sum":  map[string]any{"dataPoints": []any{dataPoint("999")}},
+				},
+			},
+		}},
+	}}}
+}
+
+func postMetrics(t *testing.T, addr string, payload map[string]any) {
+	t.Helper()
+	body, _ := json.Marshal(payload)
+	resp, err := http.Post("http://"+addr+"/v1/metrics", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post metrics: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("post metrics status = %d, want 200", resp.StatusCode)
+	}
 }
 
 func newTestDaemon(t *testing.T, mock *backendMock, backendURL string) *Daemon {
@@ -156,6 +215,75 @@ func TestEndToEndPipeline(t *testing.T) {
 	waitFor(t, 5*time.Second, func() bool { return len(mock.delivered()) >= 2 })
 	assertFieldValues(t, mock.delivered())
 	assertHealthz(t, addr)
+
+	cancel()
+	if err := <-runDone; err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+}
+
+// TestEndToEndMetricsPipeline posts an OTLP metrics fixture through a real
+// receiver and proves the allowlisted points reach the mock backend while the
+// unrecognized metric name is counted and dropped, never uploaded raw
+// (issue #21 acceptance criteria).
+func TestEndToEndMetricsPipeline(t *testing.T) {
+	mock := &backendMock{policy: api.Policy{FlushIntervalSeconds: 1, MaxBatchSize: 500}}
+	srv := mock.server(t)
+	d := newTestDaemon(t, mock, srv.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- d.Run(ctx) }()
+
+	addr := d.ReceiverAddr()
+	postMetrics(t, addr, otlpMetricsFixture())
+
+	waitFor(t, 5*time.Second, func() bool { return len(mock.deliveredMetrics()) >= 2 })
+	delivered := mock.deliveredMetrics()
+	if len(delivered) != 2 {
+		t.Fatalf("delivered %d points, want exactly 2 (the unrecognized metric must never upload)", len(delivered))
+	}
+	var sawCommit, sawCost bool
+	for _, p := range delivered {
+		switch p.MetricName {
+		case "claude_code.commit.count":
+			sawCommit = true
+			if p.Value != 1 {
+				t.Errorf("commit.count value = %v, want 1", p.Value)
+			}
+		case "claude_code.cost.usage":
+			sawCost = true
+			if p.Value != 0.05 {
+				t.Errorf("cost.usage value = %v, want 0.05", p.Value)
+			}
+		case "some.unrecognized.metric":
+			t.Fatal("unrecognized metric name reached the backend raw")
+		}
+	}
+	if !sawCommit || !sawCost {
+		t.Fatalf("missing expected allowlisted points, got %+v", delivered)
+	}
+
+	resp, err := http.Get("http://" + addr + "/healthz")
+	if err != nil {
+		t.Fatalf("healthz: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var out struct {
+		Counters map[string]int64 `json:"counters"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Counters["metrics_normalized"] != 3 {
+		t.Errorf("metrics_normalized = %d, want 3", out.Counters["metrics_normalized"])
+	}
+	if out.Counters["metrics_filtered"] != 1 {
+		t.Errorf("metrics_filtered = %d, want 1 (the unrecognized metric)", out.Counters["metrics_filtered"])
+	}
+	if out.Counters["metrics_queued"] != 2 {
+		t.Errorf("metrics_queued = %d, want 2", out.Counters["metrics_queued"])
+	}
 
 	cancel()
 	if err := <-runDone; err != nil {

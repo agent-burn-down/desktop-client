@@ -21,4 +21,12 @@ const (
 	LastHeartbeatAt = "last_heartbeat_at"
 	// AuthFailed is 1 while flushing is paused after a 401, else 0.
 	AuthFailed = "auth_failed"
+
+	// Metrics path, mirroring the events path above. Distinct names avoid
+	// colliding with the receiver's own "logs_received"/"metrics_received"
+	// atomic counters surfaced directly on /healthz.
+	MetricsNormalized = "metrics_normalized"
+	MetricsFiltered   = "metrics_filtered"
+	MetricsQueued     = "metrics_queued"
+	MetricsUploaded   = "metrics_uploaded"
 )

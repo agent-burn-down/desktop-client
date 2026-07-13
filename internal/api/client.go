@@ -223,6 +223,24 @@ func (c *Client) SendEvents(
 	return &out, nil
 }
 
+// SendMetrics posts a batch of metric points. Batches larger than
+// MaxIngestBatch are rejected client-side before any request is made.
+func (c *Client) SendMetrics(
+	ctx context.Context, collectorID int64, points []MetricPoint,
+) (*Counts, error) {
+	if len(points) > MaxIngestBatch {
+		return nil, fmt.Errorf(
+			"batch of %d metric points exceeds max %d; split before sending",
+			len(points), MaxIngestBatch)
+	}
+	body := map[string]any{"collector_id": collectorID, "points": points}
+	var out Counts
+	if err := c.postJSON(ctx, "/ingest/v1/metrics", body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // Health checks GET /api/health. It requires no auth and returns nil when the
 // backend is reachable and healthy.
 func (c *Client) Health(ctx context.Context) error {

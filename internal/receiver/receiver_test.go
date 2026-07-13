@@ -137,6 +137,40 @@ func TestMetricsCounted(t *testing.T) {
 	}
 }
 
+// TestMetricsHandlerInvoked proves /v1/metrics decodes the body and hands it
+// to MetricsHandler, mirroring /v1/logs (TestLogsAlwaysReturns200), and that a
+// panicking metrics handler still answers 200 with the recovered error.
+func TestMetricsHandlerInvoked(t *testing.T) {
+	var lastPayload map[string]any
+	s := startTest(t, Config{MetricsHandler: func(p map[string]any) (int, int) {
+		lastPayload = p
+		return 3, 1
+	}})
+	status, body := post(t, s, "/v1/metrics", "application/json", []byte(`{"resourceMetrics":[]}`))
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if body["accepted"].(float64) != 3 || body["dropped"].(float64) != 1 {
+		t.Fatalf("metrics response = %v, want accepted=3 dropped=1", body)
+	}
+	if lastPayload == nil {
+		t.Fatal("MetricsHandler was not invoked with the decoded payload")
+	}
+}
+
+func TestMetricsHandlerPanicStill200(t *testing.T) {
+	s := startTest(t, Config{MetricsHandler: func(map[string]any) (int, int) {
+		panic("boom")
+	}})
+	status, body := post(t, s, "/v1/metrics", "application/json", []byte(`{}`))
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if body["error"] == nil || !strings.Contains(fmt.Sprint(body["error"]), "boom") {
+		t.Fatalf("expected recovered error in body, got %v", body)
+	}
+}
+
 func TestHealthzCountersMerged(t *testing.T) {
 	s := startTest(t, Config{Counters: func() map[string]int64 {
 		return map[string]int64{"queue_depth": 7}

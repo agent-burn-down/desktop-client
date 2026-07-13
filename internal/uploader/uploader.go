@@ -126,6 +126,7 @@ func (u *Uploader) runCycle(ctx context.Context) {
 	}
 	u.RotateCheckOnce(ctx)
 	u.FlushOnce(ctx)
+	u.FlushMetricsOnce(ctx)
 }
 
 // cycleDelay is the wait before the next cycle: the degraded probe interval
@@ -186,6 +187,32 @@ func (u *Uploader) FlushOnce(ctx context.Context) {
 	}
 }
 
+// FlushMetricsOnce drains the metrics queue in policy-sized batches until it is
+// empty or a send fails, mirroring FlushOnce for events. It shares the same
+// Active/Degraded gating and backoff as events, since both queues report to
+// the same collector key and backend.
+func (u *Uploader) FlushMetricsOnce(ctx context.Context) {
+	if u.state() != stateActive {
+		return
+	}
+	batchSize := u.snapshotPolicy().BatchSize()
+	for {
+		items, err := u.queue.LeaseMetricsBatch(batchSize, leaseDuration)
+		if err != nil {
+			u.counters.Add(counters.UploadErrors, 1)
+			u.logger.Error("lease metrics batch failed", "err", err)
+			return
+		}
+		if len(items) == 0 {
+			u.onFlushSuccess()
+			return
+		}
+		if !u.sendMetricsBatch(ctx, items) {
+			return
+		}
+	}
+}
+
 // sendBatch uploads one leased batch, acking on success and nacking on failure.
 // It reports whether the flush cycle may continue.
 func (u *Uploader) sendBatch(ctx context.Context, items []queue.Item) bool {
@@ -200,6 +227,26 @@ func (u *Uploader) sendBatch(ctx context.Context, items []queue.Item) bool {
 		u.logger.Error("ack batch failed", "err", err)
 	}
 	u.onUploadSuccess(counts)
+	return true
+}
+
+// sendMetricsBatch uploads one leased metrics batch, acking on success and
+// nacking on failure. It reports whether the flush cycle may continue.
+func (u *Uploader) sendMetricsBatch(ctx context.Context, items []queue.MetricItem) bool {
+	ids, points := splitMetrics(items)
+	counts, err := u.client.SendMetrics(ctx, u.collectorID, points)
+	if err != nil {
+		_ = u.queue.NackMetrics(ids)
+		u.handleSendError(ctx, err)
+		return false
+	}
+	if err := u.queue.AckMetrics(ids); err != nil {
+		u.logger.Error("ack metrics batch failed", "err", err)
+	}
+	if counts != nil {
+		u.counters.Add(counters.MetricsUploaded, int64(counts.Accepted))
+	}
+	u.counters.Set(counters.LastUploadAt, u.now().Unix())
 	return true
 }
 
@@ -417,4 +464,16 @@ func split(items []queue.Item) ([]int64, []api.NormalizedEvent) {
 		events[i].EventID = &items[i].EventID
 	}
 	return ids, events
+}
+
+// splitMetrics separates leased metrics items into their row ids and points,
+// preserving order.
+func splitMetrics(items []queue.MetricItem) ([]int64, []api.MetricPoint) {
+	ids := make([]int64, len(items))
+	points := make([]api.MetricPoint, len(items))
+	for i, it := range items {
+		ids[i] = it.ID
+		points[i] = it.Point
+	}
+	return ids, points
 }
