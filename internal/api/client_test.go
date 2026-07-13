@@ -1,9 +1,11 @@
 package api
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -278,6 +280,95 @@ func TestSendEventsRejectsOversizedBatch(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(&calls); n != 0 {
 		t.Errorf("server called %d times, want 0 (rejected client-side)", n)
+	}
+}
+
+// largeEventBatch returns n events padded well past gzipThreshold when
+// marshaled, for tests exercising the gzip-encoding path.
+func largeEventBatch(n int) []NormalizedEvent {
+	events := make([]NormalizedEvent, n)
+	for i := range events {
+		name := fmt.Sprintf("api_request_%d_%s", i, strings.Repeat("x", 80))
+		events[i] = NormalizedEvent{EventName: &name}
+	}
+	return events
+}
+
+func TestSendEventsLargeBatchGzipped(t *testing.T) {
+	var gotEncoding string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotEncoding = r.Header.Get("Content-Encoding")
+		reader := io.Reader(r.Body)
+		if gotEncoding == "gzip" {
+			gr, err := gzip.NewReader(r.Body)
+			if err != nil {
+				t.Fatalf("gzip.NewReader: %v", err)
+			}
+			defer func() { _ = gr.Close() }()
+			reader = gr
+		}
+		data, err := io.ReadAll(reader)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if err := json.Unmarshal(data, &gotBody); err != nil {
+			t.Fatalf("unmarshal body %q: %v", data, err)
+		}
+		_, _ = io.WriteString(w, `{"accepted":50,"dropped":0}`)
+	}))
+	defer srv.Close()
+
+	events := largeEventBatch(50)
+	out, err := newTestClient(t, srv).SendEvents(context.Background(), 1, events)
+	if err != nil {
+		t.Fatalf("SendEvents: %v", err)
+	}
+	if out.Accepted != 50 {
+		t.Errorf("accepted = %d, want 50", out.Accepted)
+	}
+	if gotEncoding != "gzip" {
+		t.Errorf("Content-Encoding = %q, want gzip", gotEncoding)
+	}
+	evs, ok := gotBody["events"].([]any)
+	if !ok || len(evs) != 50 {
+		t.Fatalf("events = %v, want 50 elements", gotBody["events"])
+	}
+}
+
+// TestGzipFallbackOnRejection covers the fallback path: a 400/415 response to
+// a gzip-encoded request latches identity encoding for the rest of the
+// session, without retrying that failed attempt.
+func TestGzipFallbackOnRejection(t *testing.T) {
+	var encodings []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		encodings = append(encodings, r.Header.Get("Content-Encoding"))
+		_, _ = io.Copy(io.Discard, r.Body)
+		if len(encodings) == 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"detail":"malformed gzip body"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"accepted":50,"dropped":0}`)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv)
+	events := largeEventBatch(50)
+	if _, err := c.SendEvents(context.Background(), 1, events); err == nil {
+		t.Fatal("expected error on first (gzip-rejected) attempt, got nil")
+	}
+	if _, err := c.SendEvents(context.Background(), 1, events); err != nil {
+		t.Fatalf("SendEvents (after fallback): %v", err)
+	}
+	if len(encodings) != 2 {
+		t.Fatalf("server saw %d requests, want 2", len(encodings))
+	}
+	if encodings[0] != "gzip" {
+		t.Errorf("first request Content-Encoding = %q, want gzip", encodings[0])
+	}
+	if encodings[1] != "" {
+		t.Errorf("second request Content-Encoding = %q, want empty (identity fallback)", encodings[1])
 	}
 }
 

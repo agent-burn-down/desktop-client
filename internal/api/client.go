@@ -2,10 +2,12 @@ package api
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -16,6 +18,10 @@ import (
 )
 
 const httpTimeout = 10 * time.Second
+
+// gzipThreshold is the request body size above which a POST payload is
+// compressed with Content-Encoding: gzip.
+const gzipThreshold = 4 * 1024
 
 // retryDelays are the backoff sleeps between attempts. Length + 1 is the total
 // number of attempts (4). Mirrors the Python forwarder's (1, 2, 4) schedule.
@@ -96,9 +102,16 @@ type Client struct {
 	userAgent  string
 	httpClient *http.Client
 	sleep      func(time.Duration)
+	logger     *slog.Logger
 
 	keyMu        sync.Mutex
 	collectorKey string
+
+	gzipMu sync.Mutex
+	// gzipOK is true until the backend rejects a gzip-encoded request (400 or
+	// 415), at which point it latches false for the rest of the Client's
+	// lifetime and every later large request falls back to identity encoding.
+	gzipOK bool
 }
 
 // Option configures a Client.
@@ -115,6 +128,12 @@ func WithSleep(f func(time.Duration)) Option {
 	return func(c *Client) { c.sleep = f }
 }
 
+// WithLogger overrides the logger used for gzip-fallback notices. Defaults to
+// slog.Default().
+func WithLogger(l *slog.Logger) Option {
+	return func(c *Client) { c.logger = l }
+}
+
 // NewClient returns a Client for the given base URL and collector key. The
 // underlying HTTP client uses a 10s timeout unless overridden.
 func NewClient(baseURL, collectorKey string, opts ...Option) *Client {
@@ -124,6 +143,8 @@ func NewClient(baseURL, collectorKey string, opts ...Option) *Client {
 		userAgent:    "burndown-cli/" + version.Version,
 		httpClient:   &http.Client{Timeout: httpTimeout},
 		sleep:        time.Sleep,
+		logger:       slog.Default(),
+		gzipOK:       true,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -273,12 +294,16 @@ func (c *Client) doWithRetry(
 func (c *Client) doOnce(
 	ctx context.Context, method, path string, payload []byte, auth bool, out any,
 ) (bool, error) {
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bodyReader(payload))
+	body, gzipped := c.maybeCompress(payload)
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bodyReader(body))
 	if err != nil {
 		return false, fmt.Errorf("build request for %s: %w", path, err)
 	}
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if gzipped {
+		req.Header.Set("Content-Encoding", "gzip")
 	}
 	req.Header.Set("User-Agent", c.userAgent)
 	if auth {
@@ -289,7 +314,61 @@ func (c *Client) doOnce(
 		return true, fmt.Errorf("%s %s: %w", method, path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if gzipped && gzipRejected(resp.StatusCode) {
+		c.disableGzip(path, resp.StatusCode)
+	}
 	return handleResponse(resp, path, out)
+}
+
+// gzipRejected reports whether status indicates the backend could not (or
+// would not) accept a gzip-encoded request body.
+func gzipRejected(status int) bool {
+	return status == http.StatusBadRequest || status == http.StatusUnsupportedMediaType
+}
+
+// maybeCompress gzips payload when it exceeds gzipThreshold and the backend
+// has not previously rejected a gzip-encoded request this session. It reports
+// the body to send and whether that body is gzip-compressed.
+func (c *Client) maybeCompress(payload []byte) ([]byte, bool) {
+	if len(payload) <= gzipThreshold {
+		return payload, false
+	}
+	c.gzipMu.Lock()
+	ok := c.gzipOK
+	c.gzipMu.Unlock()
+	if !ok {
+		return payload, false
+	}
+	compressed, err := gzipCompress(payload)
+	if err != nil {
+		return payload, false
+	}
+	return compressed, true
+}
+
+// disableGzip latches gzip off for the rest of the Client's lifetime after
+// the backend rejects a gzip-encoded request, logging once on the transition.
+func (c *Client) disableGzip(path string, status int) {
+	c.gzipMu.Lock()
+	wasOK := c.gzipOK
+	c.gzipOK = false
+	c.gzipMu.Unlock()
+	if wasOK {
+		c.logger.Warn("backend rejected gzip-encoded request; falling back to identity encoding",
+			"path", path, "status", status)
+	}
+}
+
+func gzipCompress(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	w := gzip.NewWriter(&buf)
+	if _, err := w.Write(data); err != nil {
+		return nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // handleResponse maps a response to (retryable, error). A 200 decodes the body

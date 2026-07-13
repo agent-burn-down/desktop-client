@@ -1,6 +1,7 @@
 package uploader
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,6 +21,21 @@ import (
 	"github.com/agent-burn-down/desktop-client/internal/queue"
 	"github.com/agent-burn-down/desktop-client/internal/version"
 )
+
+// requestBody returns r.Body, transparently gunzipping it when the client set
+// Content-Encoding: gzip, mirroring the real backend's decompression middleware.
+// On a malformed gzip body it returns the original (unread) body's error state
+// via an io.Reader that yields no bytes, same as a decode failure would.
+func requestBody(r *http.Request) io.Reader {
+	if r.Header.Get("Content-Encoding") != "gzip" {
+		return r.Body
+	}
+	gr, err := gzip.NewReader(r.Body)
+	if err != nil {
+		return strings.NewReader("")
+	}
+	return gr
+}
 
 // mockBackend is an httptest handler standing in for the ingest API. It records
 // each uploaded event by SessionID so tests can prove exactly-once delivery.
@@ -85,7 +102,7 @@ func (m *mockBackend) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var body map[string]json.RawMessage
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	_ = json.NewDecoder(requestBody(r)).Decode(&body)
 	m.lastHeartbeat = body
 	if m.transientFailKey != "" && r.Header.Get("X-Collector-Key") == m.transientFailKey {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -113,7 +130,7 @@ func (m *mockBackend) handleEvents(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Events []api.NormalizedEvent `json:"events"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	_ = json.NewDecoder(requestBody(r)).Decode(&req)
 	for _, ev := range req.Events {
 		if ev.SessionID != nil {
 			m.recorded[*ev.SessionID]++
