@@ -37,17 +37,20 @@ type Config struct {
 	Port int
 	// Handler receives decoded /v1/logs payloads.
 	Handler LogHandler
+	// MetricsHandler receives decoded /v1/metrics payloads.
+	MetricsHandler LogHandler
 	// Counters, if set, contributes extra counters to /healthz.
 	Counters CountersFunc
 }
 
 // Server is the local OTLP/HTTP receiver.
 type Server struct {
-	addr     string
-	handler  LogHandler
-	counters CountersFunc
-	http     *http.Server
-	ln       net.Listener
+	addr           string
+	handler        LogHandler
+	metricsHandler LogHandler
+	counters       CountersFunc
+	http           *http.Server
+	ln             net.Listener
 
 	logsReceived    atomic.Int64
 	metricsReceived atomic.Int64
@@ -67,9 +70,10 @@ func New(cfg Config) (*Server, error) {
 		port = DefaultPort
 	}
 	s := &Server{
-		addr:     net.JoinHostPort(host, fmt.Sprintf("%d", port)),
-		handler:  cfg.Handler,
-		counters: cfg.Counters,
+		addr:           net.JoinHostPort(host, fmt.Sprintf("%d", port)),
+		handler:        cfg.Handler,
+		metricsHandler: cfg.MetricsHandler,
+		counters:       cfg.Counters,
 	}
 	s.http = &http.Server{Handler: s, ReadHeaderTimeout: readHeaderLimit}
 	return s, nil
@@ -132,7 +136,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	s.logsReceived.Add(1)
 	payload := decodeBody(w, r)
-	accepted, dropped, errStr := s.invoke(payload)
+	accepted, dropped, errStr := invoke(s.handler, payload)
 	body := map[string]any{"accepted": accepted, "dropped": dropped}
 	if errStr != "" {
 		body["error"] = errStr
@@ -140,27 +144,32 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, body)
 }
 
-// invoke calls the handler, recovering from panics so the response is always
-// produced.
-func (s *Server) invoke(payload map[string]any) (accepted, dropped int, errStr string) {
+// invoke calls handler, recovering from panics so the response is always
+// produced. A nil handler (no pipeline wired) reports zero accepted/dropped.
+func invoke(handler LogHandler, payload map[string]any) (accepted, dropped int, errStr string) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			accepted, dropped, errStr = 0, 0, fmt.Sprintf("%v", rec)
 		}
 	}()
-	if s.handler == nil {
+	if handler == nil {
 		return 0, 0, ""
 	}
-	accepted, dropped = s.handler(payload)
+	accepted, dropped = handler(payload)
 	return accepted, dropped, ""
 }
 
-// handleMetrics accepts and discards a metrics payload (not yet forwarded).
+// handleMetrics decodes the body and hands it to the metrics pipeline handler,
+// always answering 200 even when the handler panics.
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	s.metricsReceived.Add(1)
-	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
-	_, _ = io.Copy(io.Discard, r.Body)
-	writeJSON(w, http.StatusOK, map[string]any{"accepted": 0, "dropped": 0})
+	payload := decodeBody(w, r)
+	accepted, dropped, errStr := invoke(s.metricsHandler, payload)
+	body := map[string]any{"accepted": accepted, "dropped": dropped}
+	if errStr != "" {
+		body["error"] = errStr
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // handleHealth returns a counters snapshot for status and doctor.

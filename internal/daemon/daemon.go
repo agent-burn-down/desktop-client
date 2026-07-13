@@ -46,14 +46,15 @@ type Options struct {
 
 // Daemon is the composed collector process.
 type Daemon struct {
-	queue    *queue.Queue
-	filter   *filter.Filter
-	receiver *receiver.Server
-	uploader *uploader.Uploader
-	counters *counters.Registry
-	logger   *slog.Logger
-	logFile  io.Closer
-	repo     string
+	queue        *queue.Queue
+	filter       *filter.Filter
+	metricFilter *filter.MetricFilter
+	receiver     *receiver.Server
+	uploader     *uploader.Uploader
+	counters     *counters.Registry
+	logger       *slog.Logger
+	logFile      io.Closer
+	repo         string
 
 	retentionDays int
 
@@ -92,6 +93,7 @@ func assemble(opts Options, dir string, logger *slog.Logger, logFile io.Closer) 
 	d := &Daemon{
 		queue:         q,
 		filter:        filter.New(nil, nil),
+		metricFilter:  filter.NewMetricFilter(nil),
 		counters:      reg,
 		logger:        logger,
 		logFile:       logFile,
@@ -113,9 +115,10 @@ func assemble(opts Options, dir string, logger *slog.Logger, logFile io.Closer) 
 // startReceiver builds and binds the loopback receiver.
 func (d *Daemon) startReceiver(port int) error {
 	srv, err := receiver.New(receiver.Config{
-		Port:     port,
-		Handler:  d.handleLogs,
-		Counters: d.countersSnapshot,
+		Port:           port,
+		Handler:        d.handleLogs,
+		MetricsHandler: d.handleMetrics,
+		Counters:       d.countersSnapshot,
 	})
 	if err != nil {
 		return err
@@ -144,6 +147,25 @@ func (d *Daemon) handleLogs(payload map[string]any) (accepted, dropped int) {
 	}
 	d.counters.Add(counters.Queued, int64(len(toEnqueue)))
 	return len(kept), normDropped + (len(events) - len(kept))
+}
+
+// handleMetrics is the receiver's metrics handler: normalize → allowlist
+// filter → enqueue kept points. Unlike handleLogs, the filter is a true
+// allowlist (default-deny), so an unrecognized metric name is counted and
+// dropped, never enqueued or uploaded raw. It returns (accepted, dropped)
+// counts for the OTLP response; the receiver always answers 200 regardless.
+func (d *Daemon) handleMetrics(payload map[string]any) (accepted, dropped int) {
+	points, normDropped := normalize.NormalizeMetricsBatch(payload, d.repo)
+	d.counters.Add(counters.MetricsNormalized, int64(len(points)))
+	kept := d.metricFilter.Apply(points)
+	d.counters.Add(counters.MetricsFiltered, int64(len(points)-len(kept)))
+	if err := d.queue.EnqueueMetrics(kept); err != nil {
+		d.counters.Add(counters.Errors, 1)
+		d.logger.Error("enqueue metrics failed", "err", err)
+		return 0, len(points) + normDropped
+	}
+	d.counters.Add(counters.MetricsQueued, int64(len(kept)))
+	return len(kept), normDropped + (len(points) - len(kept))
 }
 
 // dueRollups flushes the filter's accumulated rollups when rollupInterval has
@@ -187,18 +209,26 @@ func (d *Daemon) runRetention(ctx context.Context) {
 	}
 }
 
-// pruneOnce deletes acked rows older than the retention window, keeping the
-// local stats database bounded. Failures are logged, not fatal.
+// pruneOnce deletes acked rows (events and metrics) older than the retention
+// window, keeping the local stats database bounded. Failures are logged, not
+// fatal.
 func (d *Daemon) pruneOnce() {
 	cutoff := time.Now().Add(-time.Duration(d.retentionDays) * 24 * time.Hour)
 	deleted, err := d.queue.PruneAcked(cutoff)
 	if err != nil {
 		d.logger.Error("retention prune failed", "err", err)
-		return
-	}
-	if deleted > 0 {
+	} else if deleted > 0 {
 		d.logger.Info("retention pruned acked rows",
 			"deleted", deleted, "retention_days", d.retentionDays)
+	}
+	deletedMetrics, err := d.queue.PruneAckedMetrics(cutoff)
+	if err != nil {
+		d.logger.Error("metrics retention prune failed", "err", err)
+		return
+	}
+	if deletedMetrics > 0 {
+		d.logger.Info("retention pruned acked metric rows",
+			"deleted", deletedMetrics, "retention_days", d.retentionDays)
 	}
 }
 

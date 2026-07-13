@@ -44,6 +44,7 @@ func (d *Daemon) drain(wg *sync.WaitGroup) error {
 	flushCtx, flushCancel := context.WithTimeout(context.Background(), finalFlushTimeout)
 	defer flushCancel()
 	d.uploader.FlushOnce(flushCtx)
+	d.uploader.FlushMetricsOnce(flushCtx)
 	return d.close()
 }
 
