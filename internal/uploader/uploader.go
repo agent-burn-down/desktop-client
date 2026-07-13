@@ -404,13 +404,17 @@ func (u *Uploader) snapshotPolicy() api.Policy {
 	return u.policy
 }
 
-// split separates leased items into their row ids and events, preserving order.
+// split separates leased items into their row ids and events, preserving
+// order, and attaches each item's queue-minted EventID as the wire event_id
+// so retries after a crash-after-send-before-ack reuse the same idempotency
+// key and the backend dedupes them.
 func split(items []queue.Item) ([]int64, []api.NormalizedEvent) {
 	ids := make([]int64, len(items))
 	events := make([]api.NormalizedEvent, len(items))
 	for i, it := range items {
 		ids[i] = it.ID
 		events[i] = it.Event
+		events[i].EventID = &items[i].EventID
 	}
 	return ids, events
 }

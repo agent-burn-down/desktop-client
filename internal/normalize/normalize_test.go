@@ -218,7 +218,7 @@ func TestNormalizeEventNameCodexPrefix(t *testing.T) {
 	assertStr(t, "event_name", events[0].EventName, "api_request")
 }
 
-func TestNormalizedEventHasAll14Keys(t *testing.T) {
+func TestNormalizedEventHasAll15Keys(t *testing.T) {
 	events, _ := NormalizeLogBatch(realisticPayload, "test-repo")
 	raw, err := json.Marshal(events[0])
 	if err != nil {
@@ -229,7 +229,7 @@ func TestNormalizedEventHasAll14Keys(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"event_name", "timestamp", "session_id", "model", "tool_name",
+		"event_id", "event_name", "timestamp", "session_id", "model", "tool_name",
 		"tool_success", "tool_duration_ms", "cost_usd", "input_tokens",
 		"output_tokens", "cache_read_tokens", "cache_create_tokens",
 		"repo", "error_message",

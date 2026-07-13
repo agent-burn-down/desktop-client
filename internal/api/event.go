@@ -3,10 +3,16 @@ package api
 // NormalizedEvent is the wire contract for a single telemetry record posted to
 // POST /ingest/v1/events.
 //
-// Every field is a pointer and every JSON tag omits omitempty so all 14 keys
+// Every field is a pointer and every JSON tag omits omitempty so all 15 keys
 // are always emitted, with null for unset values. This mirrors the backend
 // NormalizedEvent schema, whose normalizers always emit the full key set.
 type NormalizedEvent struct {
+	// EventID is the client-minted UUIDv7 idempotency key (queue.Item.EventID),
+	// attached when the queue hands a batch to the uploader — never set by the
+	// normalizer. Identical event_ids within the backend's dedupe window are
+	// counted once, so a crash-after-send-before-ack replay is never
+	// double-counted.
+	EventID           *string  `json:"event_id"`
 	EventName         *string  `json:"event_name"`
 	Timestamp         *string  `json:"timestamp"`
 	SessionID         *string  `json:"session_id"`
