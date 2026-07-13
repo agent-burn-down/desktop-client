@@ -372,6 +372,32 @@ func TestGzipFallbackOnRejection(t *testing.T) {
 	}
 }
 
+// TestGzipNotDisabledOnUnrelatedBadRequest covers the negative case: a 400
+// that has nothing to do with gzip (e.g. a validation error) must not latch
+// off compression, since the body isn't the backend's decompression-middleware
+// error shape.
+func TestGzipNotDisabledOnUnrelatedBadRequest(t *testing.T) {
+	var encodings []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		encodings = append(encodings, r.Header.Get("Content-Encoding"))
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"detail":"unrelated validation error"}`)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv)
+	events := largeEventBatch(50)
+	for range 2 {
+		if _, err := c.SendEvents(context.Background(), 1, events); err == nil {
+			t.Fatal("expected error for 400 response, got nil")
+		}
+	}
+	if len(encodings) != 2 || encodings[0] != "gzip" || encodings[1] != "gzip" {
+		t.Errorf("encodings = %v, want [gzip gzip] (unrelated 400 must not disable gzip)", encodings)
+	}
+}
+
 func TestSetKeySwapsSubsequentRequests(t *testing.T) {
 	var gotKeys []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

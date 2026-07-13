@@ -314,16 +314,28 @@ func (c *Client) doOnce(
 		return true, fmt.Errorf("%s %s: %w", method, path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if gzipped && gzipRejected(resp.StatusCode) {
-		c.disableGzip(path, resp.StatusCode)
+	if gzipped {
+		c.checkGzipRejected(path, resp)
 	}
 	return handleResponse(resp, path, out)
 }
 
-// gzipRejected reports whether status indicates the backend could not (or
-// would not) accept a gzip-encoded request body.
-func gzipRejected(status int) bool {
-	return status == http.StatusBadRequest || status == http.StatusUnsupportedMediaType
+// checkGzipRejected latches gzip off when resp indicates the backend could
+// not handle the gzip-encoded body just sent: an unambiguous 415, or a 400
+// whose detail mentions gzip (the backend's decompression middleware's own
+// error shape, e.g. "malformed gzip body"). A 400 from unrelated validation
+// leaves gzip enabled. Restores resp.Body so handleResponse can still read it.
+func (c *Client) checkGzipRejected(path string, resp *http.Response) {
+	switch resp.StatusCode {
+	case http.StatusUnsupportedMediaType:
+		c.disableGzip(path, resp.StatusCode)
+	case http.StatusBadRequest:
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		resp.Body = io.NopCloser(bytes.NewReader(data))
+		if bytes.Contains(bytes.ToLower(data), []byte("gzip")) {
+			c.disableGzip(path, resp.StatusCode)
+		}
+	}
 }
 
 // maybeCompress gzips payload when it exceeds gzipThreshold and the backend
