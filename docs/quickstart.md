@@ -4,7 +4,19 @@ A fresh machine goes from nothing to a running collector in five steps. The
 [README](https://github.com/agent-burn-down/desktop-client#quickstart) is the
 canonical version; this page adds a little more detail.
 
-Requires Go 1.26 or newer and macOS. Build and install the binary first:
+macOS only. Install the prebuilt binary first — no repo checkout needed. Pick
+`arm64` for Apple silicon or `amd64` for Intel:
+
+```
+ARCH=arm64   # Intel Macs: amd64
+REPO=agent-burn-down/desktop-client
+TAG=$(curl -fsSL https://api.github.com/repos/$REPO/releases/latest | grep -m1 '"tag_name"' | cut -d'"' -f4)
+curl -fsSL "https://github.com/$REPO/releases/download/$TAG/burndown-cli_${TAG#v}_darwin_${ARCH}.tar.gz" | tar -xzf - burndown-cli
+sudo mv burndown-cli /usr/local/bin/
+```
+
+The binary is not notarized yet (issue #14); fetching it with `curl` avoids
+Gatekeeper quarantine. To build from source instead (requires Go 1.26 or newer):
 
 ```
 git clone https://github.com/agent-burn-down/desktop-client.git

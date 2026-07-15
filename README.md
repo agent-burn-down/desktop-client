@@ -44,8 +44,28 @@ content to do so.
 
 ## Install
 
-Homebrew tap is not available yet. It is tracked in issue #14 and is on hold
-pending Apple Developer ID signing. Build from source in the meantime.
+macOS only. A Homebrew tap is not available yet — it is tracked in issue #14 and
+is on hold pending Apple Developer ID signing.
+
+### Prebuilt binary (recommended)
+
+Every release ships prebuilt macOS binaries, so you can install without a repo
+checkout. Pick `arm64` for Apple silicon or `amd64` for Intel:
+
+```
+ARCH=arm64   # Intel Macs: amd64
+REPO=agent-burn-down/desktop-client
+TAG=$(curl -fsSL https://api.github.com/repos/$REPO/releases/latest | grep -m1 '"tag_name"' | cut -d'"' -f4)
+curl -fsSL "https://github.com/$REPO/releases/download/$TAG/burndown-cli_${TAG#v}_darwin_${ARCH}.tar.gz" | tar -xzf - burndown-cli
+sudo mv burndown-cli /usr/local/bin/
+```
+
+The binary is not notarized yet (issue #14). Fetching it with `curl` as shown
+avoids Gatekeeper quarantine; if you download the tarball through a browser
+instead, clear the flag with `xattr -d com.apple.quarantine burndown-cli` before
+running it.
+
+### Build from source
 
 Requires Go 1.26 or newer and macOS.
 
@@ -53,11 +73,6 @@ Requires Go 1.26 or newer and macOS.
 git clone https://github.com/agent-burn-down/desktop-client.git
 cd desktop-client
 make build
-```
-
-That produces `bin/burndown-cli`. Copy it onto your `PATH`:
-
-```
 cp bin/burndown-cli /usr/local/bin/
 ```
 
