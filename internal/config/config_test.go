@@ -93,6 +93,60 @@ func TestPermissionsRepairedOnLoad(t *testing.T) {
 	}
 }
 
+func TestLoadMigratesLegacyDefaultAPIURL(t *testing.T) {
+	s := newTestStore(t)
+	if err := os.MkdirAll(filepath.Dir(s.Path()), dirPerm); err != nil {
+		t.Fatalf("create config dir: %v", err)
+	}
+	original := `{"api_url":"https://app.agentburndown.com","collector_key":"abd_secret",` +
+		`"machine":"laptop","future_key":{"nested":42}}`
+	if err := os.WriteFile(s.Path(), []byte(original), filePerm); err != nil {
+		t.Fatalf("write legacy config: %v", err)
+	}
+
+	cfg, err := s.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.APIURL != DefaultAPIURL {
+		t.Errorf("api_url = %q, want %q", cfg.APIURL, DefaultAPIURL)
+	}
+
+	data, err := os.ReadFile(s.Path())
+	if err != nil {
+		t.Fatalf("read migrated config: %v", err)
+	}
+	var persisted map[string]json.RawMessage
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatalf("decode migrated config: %v", err)
+	}
+	if string(persisted["api_url"]) != `"`+DefaultAPIURL+`"` {
+		t.Errorf("persisted api_url = %s, want %q", persisted["api_url"], DefaultAPIURL)
+	}
+	var future map[string]int
+	if err := json.Unmarshal(persisted["future_key"], &future); err != nil {
+		t.Fatalf("decode preserved unknown field: %v", err)
+	}
+	if future["nested"] != 42 {
+		t.Errorf("unknown field not preserved: %s", persisted["future_key"])
+	}
+}
+
+func TestLoadPreservesCustomAPIURL(t *testing.T) {
+	s := newTestStore(t)
+	const customURL = "https://collector.staging.example.com"
+	if err := s.Save(&Config{APIURL: customURL}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	cfg, err := s.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.APIURL != customURL {
+		t.Errorf("api_url = %q, want custom URL %q", cfg.APIURL, customURL)
+	}
+}
+
 func TestCorruptConfigError(t *testing.T) {
 	s := newTestStore(t)
 	if err := os.MkdirAll(filepath.Dir(s.Path()), dirPerm); err != nil {

@@ -3,7 +3,7 @@
 Local telemetry collector for coding agents. It runs on your machine, receives
 OTLP telemetry from Claude Code and Codex on `127.0.0.1:8765`, keeps only
 metadata, and uploads that metadata to the Agent Burn Down backend at
-`app.agentburndown.com`.
+`collector.agentburndown.com`.
 
 Metadata-only by design: no prompt text, completion text, tool payloads, or file
 contents ever leave your machine. See [Privacy](privacy.md).

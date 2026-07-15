@@ -50,6 +50,17 @@ func runCmd(t *testing.T, args ...string) (stdout string, err error) {
 	return out.String(), err
 }
 
+func TestLoginDefaultsToCollectorEndpoint(t *testing.T) {
+	cmd := newLoginCmd()
+	got, err := cmd.Flags().GetString("api-url")
+	if err != nil {
+		t.Fatalf("read api-url flag: %v", err)
+	}
+	if got != config.DefaultAPIURL {
+		t.Errorf("api-url default = %q, want %q", got, config.DefaultAPIURL)
+	}
+}
+
 func TestLoginPersistsCredentialsPrefixOnly(t *testing.T) {
 	t.Setenv(config.EnvConfigDir, t.TempDir())
 	srv := fakeBackend(t)
