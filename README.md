@@ -199,7 +199,7 @@ Every uploaded event is built from a fixed allowlist. The normalizer copies thes
 | `output_tokens` | Completion token count |
 | `cache_read_tokens` | Cache-read token count |
 | `cache_create_tokens` | Cache-write token count |
-| `repo` | Repository name |
+| `repo` | Privacy-safe repository or project-directory name |
 | `error_message` | Error string, truncated to 2 KB |
 
 `error_message` is the only free-text field that passes through, and it is capped

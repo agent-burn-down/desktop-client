@@ -140,7 +140,7 @@ func (d *Daemon) startReceiver(port int) error {
 // OTLP response; the receiver always answers 200 regardless.
 func (d *Daemon) handleLogs(payload map[string]any) (accepted, dropped int) {
 	events, normDropped := normalize.NormalizeLogBatch(payload, d.repo)
-	d.enrichCodexRepos(events)
+	d.enrichRepos(events)
 	d.counters.Add(counters.Received, int64(len(events)+normDropped))
 	d.counters.Add(counters.Normalized, int64(len(events)))
 	kept := d.filter.Apply(events)
@@ -163,22 +163,22 @@ func (d *Daemon) handleLogs(payload map[string]any) (accepted, dropped int) {
 	return len(kept), normDropped + (len(events) - len(kept))
 }
 
-// enrichCodexRepos resolves repository attribution independently for each
-// conversation before filtering and durable queueing. A per-batch lookup cache
-// avoids rescanning the same active session for every record in one request.
-func (d *Daemon) enrichCodexRepos(events []api.NormalizedEvent) {
+// enrichRepos resolves repository attribution independently for each agent
+// session before filtering and durable queueing. A per-batch lookup cache avoids
+// rescanning the same active session for every record in one request.
+func (d *Daemon) enrichRepos(events []api.NormalizedEvent) {
 	if d.repo != "" || d.repoResolver == nil {
 		return
 	}
 	resolved := make(map[string]string)
 	for i := range events {
-		id := codexConversationID(events[i])
+		id := eventSessionID(events[i])
 		if id == "" {
 			continue
 		}
 		repo, seen := resolved[id]
 		if !seen {
-			repo = d.repoResolver.Resolve(id)
+			repo = d.resolveEventRepo(events[i], id)
 			resolved[id] = repo
 		}
 		if repo != "" {
@@ -187,14 +187,23 @@ func (d *Daemon) enrichCodexRepos(events []api.NormalizedEvent) {
 	}
 }
 
-func codexConversationID(event api.NormalizedEvent) string {
-	if event.Repo != nil || event.SessionID == nil || event.EventName == nil {
-		return ""
-	}
-	if !strings.HasPrefix(*event.EventName, "codex.") {
+func eventSessionID(event api.NormalizedEvent) string {
+	if event.Repo != nil || event.SessionID == nil {
 		return ""
 	}
 	return *event.SessionID
+}
+
+func (d *Daemon) resolveEventRepo(event api.NormalizedEvent, sessionID string) string {
+	if event.EventName != nil && strings.HasPrefix(*event.EventName, "codex.") {
+		return d.repoResolver.Resolve(sessionID)
+	}
+	if repo := d.repoResolver.ResolveClaude(sessionID); repo != "" {
+		return repo
+	}
+	// Older Codex versions emitted unprefixed event names. Retaining this
+	// fallback attributes those sessions when their local metadata still exists.
+	return d.repoResolver.Resolve(sessionID)
 }
 
 // handleMetrics is the receiver's metrics handler: normalize → allowlist

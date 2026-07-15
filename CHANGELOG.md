@@ -10,11 +10,15 @@ All notable changes to `burndown-cli` are documented here.
   including structured per-model token contributions.
 - Persist revisioned summaries in the local SQLite queue and upload them to the
   hosted Session Explorer with bounded batches, retry, and stale-ack safety.
+- Attribute Claude Code telemetry to project directories using local session
+  metadata, including non-Git directories and transient worktree layouts.
 
 ### Changed
 
 - Retain session summaries across restarts and prune acknowledged snapshots on
   the configured local retention schedule.
+- Use directory names as privacy-safe project keys when no Git repository can
+  be resolved.
 
 ## [0.4.0] - 2026-07-15
 
