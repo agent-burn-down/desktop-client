@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -47,6 +48,46 @@ func TestResolveFindsArchivedSession(t *testing.T) {
 	writeSession(t, path, line("session_meta", testConversationID, repo))
 	if got := New(home).Resolve(testConversationID); got != "archived-repo" {
 		t.Fatalf("Resolve archived = %q, want archived-repo", got)
+	}
+}
+
+func TestResolveClaudeUsesLatestCWDAndDirectoryFallback(t *testing.T) {
+	codexHome := t.TempDir()
+	claudeHome := t.TempDir()
+	first := filepath.Join(t.TempDir(), "first-plain-project")
+	latest := filepath.Join(t.TempDir(), "latest-plain-project")
+	mustMkdir(t, first)
+	mustMkdir(t, latest)
+	path := filepath.Join(claudeHome, "projects", "-Users-test-project", testConversationID+".jsonl")
+	writeSession(t, path,
+		claudeLine(first)+claudeLine(latest))
+
+	r := NewWithHomes(codexHome, claudeHome)
+	if got := r.ResolveClaude(testConversationID); got != "latest-plain-project" {
+		t.Fatalf("ResolveClaude = %q, want latest-plain-project", got)
+	}
+
+	next := filepath.Join(t.TempDir(), "next-plain-project")
+	mustMkdir(t, next)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(claudeLine(next))
+	_ = f.Close()
+	if got := r.ResolveClaude(testConversationID); got != "next-plain-project" {
+		t.Fatalf("ResolveClaude after append = %q, want next-plain-project", got)
+	}
+}
+
+func TestResolveClaudeCollapsesDeletedKnownWorktreePath(t *testing.T) {
+	claudeHome := t.TempDir()
+	path := filepath.Join(claudeHome, "projects", "encoded", testConversationID+".jsonl")
+	writeSession(t, path, claudeLine(
+		"/Users/test/code/project/.claude/worktrees/worktree-1234/nested"))
+
+	if got := NewWithHomes(t.TempDir(), claudeHome).ResolveClaude(testConversationID); got != "project" {
+		t.Fatalf("ResolveClaude deleted worktree = %q, want project", got)
 	}
 }
 
@@ -126,12 +167,27 @@ func TestCollapseKnownWorktreePaths(t *testing.T) {
 	}
 }
 
+func TestCanonicalRepoBoundsProjectLabelForAPIContract(t *testing.T) {
+	longName := strings.Repeat("界", maxProjectLabelRunes+20)
+	got := canonicalRepo(filepath.Join("/path/that/does/not/exist", longName))
+	if len([]rune(got)) != maxProjectLabelRunes {
+		t.Fatalf("project label rune count = %d, want %d", len([]rune(got)), maxProjectLabelRunes)
+	}
+	if strings.Contains(got, "/") {
+		t.Fatalf("project label leaked path: %q", got)
+	}
+}
+
 func sessionPath(home, id string) string {
 	return filepath.Join(home, "sessions", "2026", "07", "14", "rollout-2026-07-14T00-00-00-"+id+".jsonl")
 }
 
 func line(kind, id, cwd string) string {
 	return fmt.Sprintf("{\"type\":%q,\"payload\":{\"id\":%q,\"cwd\":%q}}\n", kind, id, cwd)
+}
+
+func claudeLine(cwd string) string {
+	return fmt.Sprintf("{\"type\":\"user\",\"sessionId\":%q,\"cwd\":%q}\n", testConversationID, cwd)
 }
 
 func writeSession(t *testing.T, path, content string) {

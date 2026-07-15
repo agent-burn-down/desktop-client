@@ -7,15 +7,43 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/agent-burn-down/desktop-client/internal/api"
+	"github.com/agent-burn-down/desktop-client/internal/codexrepo"
 	"github.com/agent-burn-down/desktop-client/internal/config"
 	"github.com/agent-burn-down/desktop-client/internal/queue"
 )
+
+func TestEnrichReposUsesClaudeSessionMetadata(t *testing.T) {
+	const sessionID = "8ef3ffe2-1bcb-424d-8a7b-053628ba438d"
+	claudeHome := t.TempDir()
+	project := filepath.Join(t.TempDir(), "plain-directory-project")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sessionPath := filepath.Join(claudeHome, "projects", "encoded", sessionID+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(sessionPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	content := `{"type":"user","sessionId":"` + sessionID + `","cwd":"` + project + `"}` + "\n"
+	if err := os.WriteFile(sessionPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	name := "api_request"
+	id := sessionID
+	events := []api.NormalizedEvent{{EventName: &name, SessionID: &id}}
+	d := &Daemon{repoResolver: codexrepo.NewWithHomes(t.TempDir(), claudeHome)}
+	d.enrichRepos(events)
+	if events[0].Repo == nil || *events[0].Repo != "plain-directory-project" {
+		t.Fatalf("repo = %v, want plain-directory-project", events[0].Repo)
+	}
+}
 
 // backendMock stands in for the ingest API and records delivered events.
 type backendMock struct {
