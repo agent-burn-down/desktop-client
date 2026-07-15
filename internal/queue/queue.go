@@ -108,6 +108,10 @@ func Open(path string, opts Options) (*Queue, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := q.initSessions(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return q, nil
 }
 
@@ -382,6 +386,9 @@ func (q *Queue) Check() error {
 	}
 	if _, err := q.scalar("SELECT COUNT(*) FROM queue"); err != nil {
 		return fmt.Errorf("queryability check: %w", err)
+	}
+	if _, err := q.scalar("SELECT COUNT(*) FROM sessions_queue"); err != nil {
+		return fmt.Errorf("sessions queryability check: %w", err)
 	}
 	return nil
 }

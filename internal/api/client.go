@@ -241,6 +241,25 @@ func (c *Client) SendMetrics(
 	return &out, nil
 }
 
+// SendSessions posts durable sanitized session snapshots. The backend applies
+// newer-updated_at idempotency, so crash-after-send retries are safe.
+func (c *Client) SendSessions(
+	ctx context.Context, collectorID int64, sessions []SessionSummary,
+) (*Counts, error) {
+	const maxSessionBatch = 500
+	if len(sessions) > maxSessionBatch {
+		return nil, fmt.Errorf(
+			"batch of %d session summaries exceeds max %d; split before sending",
+			len(sessions), maxSessionBatch)
+	}
+	body := map[string]any{"collector_id": collectorID, "sessions": sessions}
+	var out Counts
+	if err := c.postJSON(ctx, "/ingest/v1/sessions", body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // Health checks GET /api/health. It requires no auth and returns nil when the
 // backend is reachable and healthy.
 func (c *Client) Health(ctx context.Context) error {

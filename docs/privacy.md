@@ -30,6 +30,12 @@ No prompt text, no completion text, no tool call arguments or results, and no
 file contents are ever read into an uploaded event. Those values are not on the
 allowlist, so the normalizer never copies them.
 
+The collector also folds those same allowlisted normalized events into a
+session summary. It uploads session id, timestamps, safe repository label,
+source, outcome, token totals, cost/tool/error counters, and a structured list
+of actual model token contributions. It does not scan prompts or completions,
+and it drops absolute repository paths and composite `mixed:` model labels.
+
 `error_message` is the only free-text field that passes through. It is capped at
 2 KB on a UTF-8 boundary so a misbehaving agent cannot stream large diagnostics
 (or accidental prompt fragments) through it.

@@ -9,9 +9,9 @@ flowchart LR
     A["Claude Code / Codex"] -->|"OTLP over HTTP<br/>127.0.0.1:8765/v1/logs"| R[receiver]
     R --> N[normalize]
     N --> F[filter]
-    F --> Q[("queue<br/>~/.burndown/queue.db")]
+    F --> Q[("event + session queues<br/>~/.burndown/queue.db")]
     Q --> U[uploader]
-    U -->|"POST /ingest/v1/events"| B["collector.agentburndown.com"]
+    U -->|"POST /ingest/v1/events<br/>POST /ingest/v1/sessions"| B["collector.agentburndown.com"]
 ```
 
 ## Stages
@@ -34,14 +34,22 @@ does not drop the event.
 **filter** — drops events that are not worth uploading and enforces the metadata
 contract before anything reaches the queue.
 
+The session accumulator reads the complete normalized metadata batch immediately
+before that noise filter. Token-bearing noise is uploaded only as aggregate
+rollups, while the session summary retains its per-session token contribution;
+the two totals therefore reconcile for telemetry observed by the daemon.
+
 **queue** — a local SQLite database (`~/.burndown/queue.db`) that persists events
 across restarts and network outages. Uploaded rows are retained for the
 configured window (default 7 days) so `stats` can summarize local usage, then
-pruned.
+pruned. The same database stores one revisioned, retry-safe metadata-only
+snapshot per observed session.
 
 **uploader** — drains the queue to `POST /ingest/v1/events` on the cadence set by
 the backend policy (`flush_interval_seconds`, `max_batch_size`), which the daemon
-refreshes on each heartbeat.
+refreshes on each heartbeat. It also uploads session snapshots to
+`POST /ingest/v1/sessions`; revision-aware acknowledgements keep a newer local
+snapshot pending if an older revision was in flight.
 
 ## Backend endpoints
 
@@ -50,6 +58,7 @@ refreshes on each heartbeat.
 | `POST /ingest/v1/register` | Register the machine, resolve collector id, fetch policy |
 | `POST /ingest/v1/heartbeat` | Liveness ping; refreshes policy |
 | `POST /ingest/v1/events` | Upload a batch of normalized events |
+| `POST /ingest/v1/sessions` | Upload idempotent structured session summaries |
 | `GET /api/health` | Unauthenticated reachability check |
 
 ## Background service
