@@ -68,7 +68,7 @@ func flattenLogRecord(record any, repo string) *api.NormalizedEvent {
 		CacheReadTokens:   intOrNil(pyOr(cacheReadAliases(attrs)...)),
 		CacheCreateTokens: intOrNil(attrs["cache_creation_tokens"]),
 		Repo:              asString(pyOr(repo, attrs["repo"], attrs["repository"])),
-		ErrorMessage:      truncated(asString(attrs["error"])),
+		ErrorMessage:      truncated(asString(pyOr(attrs["error"], attrs["error.message"]))),
 	}
 }
 
@@ -98,17 +98,12 @@ func eventTimestamp(attrs, record map[string]any) *string {
 	return &now
 }
 
-// normalizeEventName strips a leading "codex." prefix and drops empty or
-// non-string names by returning nil.
+// normalizeEventName preserves agent namespaces such as "codex." so the
+// hosted rollup store can derive the correct source. Empty or non-string names
+// are dropped by returning nil.
 func normalizeEventName(v any) *string {
 	s, ok := v.(string)
-	if !ok || s == "" {
-		return nil
-	}
-	if strings.HasPrefix(s, "codex.") {
-		s = strings.SplitN(s, ".", 2)[1]
-	}
-	if s == "" {
+	if !ok || s == "" || s == "codex." {
 		return nil
 	}
 	return &s

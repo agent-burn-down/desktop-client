@@ -215,7 +215,39 @@ func TestNormalizeEventNameCodexPrefix(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("want 1 event, got %d", len(events))
 	}
-	assertStr(t, "event_name", events[0].EventName, "api_request")
+	assertStr(t, "event_name", events[0].EventName, "codex.api_request")
+}
+
+func TestCodexErrorMessageAliasAndPrivacy(t *testing.T) {
+	payload := map[string]any{
+		"resourceLogs": []any{map[string]any{
+			"scopeLogs": []any{map[string]any{
+				"logRecords": []any{map[string]any{
+					"attributes": []any{
+						attr("event.name", "stringValue", "codex.api_error"),
+						attr("error.message", "stringValue", "request failed"),
+						attr("prompt", "stringValue", "SECRET-CODEX-PROMPT"),
+						attr("completion", "stringValue", "SECRET-CODEX-COMPLETION"),
+						attr("tool_input", "stringValue", "SECRET-CODEX-TOOL-PAYLOAD"),
+					},
+				}},
+			}},
+		}},
+	}
+	events, _ := NormalizeLogBatch(payload, "")
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1", len(events))
+	}
+	assertStr(t, "error_message", events[0].ErrorMessage, "request failed")
+	raw, err := json.Marshal(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"SECRET-CODEX-PROMPT", "SECRET-CODEX-COMPLETION", "SECRET-CODEX-TOOL-PAYLOAD"} {
+		if strings.Contains(string(raw), secret) {
+			t.Fatalf("output leaked %q: %s", secret, raw)
+		}
+	}
 }
 
 func TestNormalizedEventHasAll15Keys(t *testing.T) {

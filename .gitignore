@@ -4,3 +4,4 @@ site/
 *.test
 coverage.out
 .DS_Store
+.memsearch/.index.pid

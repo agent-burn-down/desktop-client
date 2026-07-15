@@ -76,6 +76,21 @@ burndown-cli setup --all
    counts events already uploaded and still inside the retention window (default
    7 days), so a brand-new event appears after the next upload cycle.
 
+## Codex events show an unknown repository
+
+Repository attribution applies to new Codex telemetry received after installing
+the fixed client. The collector resolves each `conversation.id` against local
+Codex session metadata; it does not rewrite events or rollups that the hosted
+service already ingested as `(unknown)`.
+
+For a new session, confirm its file exists below `~/.codex/sessions` (or
+`~/.codex/archived_sessions`) and contains `session_meta.payload.cwd` or
+`turn_context.payload.cwd`. Missing or unreadable metadata safely leaves the
+repository unknown without dropping telemetry. Historical repair is deliberately
+out of scope for the client: it must be performed as a separate, auditable
+backend migration using the original event timestamps and conversation IDs,
+rather than mutating local queue history.
+
 ## Logs
 
 The service writes stdout and stderr to:
