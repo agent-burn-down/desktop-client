@@ -9,10 +9,12 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/agent-burn-down/desktop-client/internal/api"
+	"github.com/agent-burn-down/desktop-client/internal/codexrepo"
 	"github.com/agent-burn-down/desktop-client/internal/config"
 	"github.com/agent-burn-down/desktop-client/internal/counters"
 	"github.com/agent-burn-down/desktop-client/internal/filter"
@@ -37,11 +39,12 @@ const (
 
 // Options configures a Daemon. Config and Store are required.
 type Options struct {
-	Config  *config.Config
-	Store   config.Store
-	Port    int
-	Verbose bool
-	Repo    string
+	Config    *config.Config
+	Store     config.Store
+	Port      int
+	Verbose   bool
+	Repo      string
+	CodexHome string
 }
 
 // Daemon is the composed collector process.
@@ -55,6 +58,7 @@ type Daemon struct {
 	logger       *slog.Logger
 	logFile      io.Closer
 	repo         string
+	repoResolver *codexrepo.Resolver
 
 	retentionDays int
 
@@ -98,6 +102,7 @@ func assemble(opts Options, dir string, logger *slog.Logger, logFile io.Closer) 
 		logger:        logger,
 		logFile:       logFile,
 		repo:          opts.Repo,
+		repoResolver:  codexrepo.New(opts.CodexHome),
 		retentionDays: cfg.Retention(),
 		lastRollup:    time.Now(),
 	}
@@ -135,6 +140,7 @@ func (d *Daemon) startReceiver(port int) error {
 // OTLP response; the receiver always answers 200 regardless.
 func (d *Daemon) handleLogs(payload map[string]any) (accepted, dropped int) {
 	events, normDropped := normalize.NormalizeLogBatch(payload, d.repo)
+	d.enrichCodexRepos(events)
 	d.counters.Add(counters.Received, int64(len(events)+normDropped))
 	d.counters.Add(counters.Normalized, int64(len(events)))
 	kept := d.filter.Apply(events)
@@ -147,6 +153,40 @@ func (d *Daemon) handleLogs(payload map[string]any) (accepted, dropped int) {
 	}
 	d.counters.Add(counters.Queued, int64(len(toEnqueue)))
 	return len(kept), normDropped + (len(events) - len(kept))
+}
+
+// enrichCodexRepos resolves repository attribution independently for each
+// conversation before filtering and durable queueing. A per-batch lookup cache
+// avoids rescanning the same active session for every record in one request.
+func (d *Daemon) enrichCodexRepos(events []api.NormalizedEvent) {
+	if d.repo != "" || d.repoResolver == nil {
+		return
+	}
+	resolved := make(map[string]string)
+	for i := range events {
+		id := codexConversationID(events[i])
+		if id == "" {
+			continue
+		}
+		repo, seen := resolved[id]
+		if !seen {
+			repo = d.repoResolver.Resolve(id)
+			resolved[id] = repo
+		}
+		if repo != "" {
+			events[i].Repo = &repo
+		}
+	}
+}
+
+func codexConversationID(event api.NormalizedEvent) string {
+	if event.Repo != nil || event.SessionID == nil || event.EventName == nil {
+		return ""
+	}
+	if !strings.HasPrefix(*event.EventName, "codex.") {
+		return ""
+	}
+	return *event.SessionID
 }
 
 // handleMetrics is the receiver's metrics handler: normalize → allowlist

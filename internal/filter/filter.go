@@ -4,6 +4,7 @@
 package filter
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -95,10 +96,11 @@ func (f *Filter) Apply(events []api.NormalizedEvent) []api.NormalizedEvent {
 // shouldKeep decides an event by name: keep wins over drop; unknown names are
 // kept (conservative — only known noise is dropped).
 func (f *Filter) shouldKeep(eventName string) bool {
-	if f.keep[eventName] {
+	family := strings.TrimPrefix(eventName, "codex.")
+	if f.keep[family] {
 		return true
 	}
-	if f.drop[eventName] {
+	if f.drop[family] {
 		return false
 	}
 	return true

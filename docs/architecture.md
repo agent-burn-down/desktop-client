@@ -24,6 +24,13 @@ leaves the machine unencrypted or reaches the network.
 a fixed metadata allowlist (see [Privacy](privacy.md)). Records without a usable
 event name are dropped; free text is never copied.
 
+For Codex logs, the daemon uses `conversation.id` to read only `id` and `cwd`
+from the matching local `~/.codex/sessions/**/*.jsonl` or archived session file.
+The latest `turn_context.payload.cwd` is preferred, Git worktrees are collapsed
+to their common repository, and only the resulting repository name is attached
+before queueing. Missing or unreadable session metadata leaves `repo` unset and
+does not drop the event.
+
 **filter** — drops events that are not worth uploading and enforces the metadata
 contract before anything reaches the queue.
 

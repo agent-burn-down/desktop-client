@@ -87,8 +87,8 @@ func TestNormalizeEventNameEdge(t *testing.T) {
 	if normalizeEventName(123) != nil {
 		t.Fatal("non-string name should drop")
 	}
-	if got := normalizeEventName("codex.a.b"); got == nil || *got != "a.b" {
-		t.Fatalf("codex.a.b -> %v, want a.b", got)
+	if got := normalizeEventName("codex.a.b"); got == nil || *got != "codex.a.b" {
+		t.Fatalf("codex.a.b -> %v, want codex.a.b", got)
 	}
 }
 

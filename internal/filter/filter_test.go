@@ -25,6 +25,8 @@ func TestApplyPerFamily(t *testing.T) {
 		{"api_retries_exhausted", true},
 		{"compaction", true},
 		{"websocket_event", false},
+		{"codex.sse_event", true},
+		{"codex.websocket_event", false},
 		{"some_unknown_event", true}, // default keep (conservative)
 		{"", true},                   // missing name kept by default
 	}
