@@ -2,6 +2,14 @@
 
 All notable changes to `burndown-cli` are documented here.
 
+## [Unreleased]
+
+### Changed
+
+- Document installing from the prebuilt release binaries so a new machine can
+  install the collector without cloning the repository. Build-from-source is
+  retained as an alternative.
+
 ## [0.5.0] - 2026-07-15
 
 ### Added
@@ -55,6 +63,7 @@ All notable changes to `burndown-cli` are documented here.
   rotation, service management, local retention, diagnostics, and metadata-only
   telemetry ingestion.
 
+[Unreleased]: https://github.com/agent-burn-down/desktop-client/compare/v0.5.0...HEAD
 [0.5.0]: https://github.com/agent-burn-down/desktop-client/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/agent-burn-down/desktop-client/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/agent-burn-down/desktop-client/compare/v0.2.0...v0.3.0
