@@ -2,6 +2,20 @@
 
 All notable changes to `burndown-cli` are documented here.
 
+## [0.5.0] - 2026-07-15
+
+### Added
+
+- Build privacy-safe session summaries from allowlisted normalized telemetry,
+  including structured per-model token contributions.
+- Persist revisioned summaries in the local SQLite queue and upload them to the
+  hosted Session Explorer with bounded batches, retry, and stale-ack safety.
+
+### Changed
+
+- Retain session summaries across restarts and prune acknowledged snapshots on
+  the configured local retention schedule.
+
 ## [0.4.0] - 2026-07-15
 
 ### Changed
@@ -37,6 +51,7 @@ All notable changes to `burndown-cli` are documented here.
   rotation, service management, local retention, diagnostics, and metadata-only
   telemetry ingestion.
 
+[0.5.0]: https://github.com/agent-burn-down/desktop-client/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/agent-burn-down/desktop-client/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/agent-burn-down/desktop-client/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/agent-burn-down/desktop-client/compare/v0.1.0...v0.2.0

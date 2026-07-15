@@ -127,6 +127,7 @@ func (u *Uploader) runCycle(ctx context.Context) {
 	u.RotateCheckOnce(ctx)
 	u.FlushOnce(ctx)
 	u.FlushMetricsOnce(ctx)
+	u.FlushSessionsOnce(ctx)
 }
 
 // cycleDelay is the wait before the next cycle: the degraded probe interval
@@ -213,6 +214,31 @@ func (u *Uploader) FlushMetricsOnce(ctx context.Context) {
 	}
 }
 
+// FlushSessionsOnce drains durable session snapshots. Session leases include
+// the row revision so a summary updated while an older revision is in flight
+// remains pending and is uploaded again instead of being incorrectly acked.
+func (u *Uploader) FlushSessionsOnce(ctx context.Context) {
+	if u.state() != stateActive {
+		return
+	}
+	batchSize := u.snapshotPolicy().BatchSize()
+	for {
+		items, err := u.queue.LeaseSessionsBatch(batchSize, leaseDuration)
+		if err != nil {
+			u.counters.Add(counters.UploadErrors, 1)
+			u.logger.Error("lease sessions batch failed", "err", err)
+			return
+		}
+		if len(items) == 0 {
+			u.onFlushSuccess()
+			return
+		}
+		if !u.sendSessionsBatch(ctx, items) {
+			return
+		}
+	}
+}
+
 // sendBatch uploads one leased batch, acking on success and nacking on failure.
 // It reports whether the flush cycle may continue.
 func (u *Uploader) sendBatch(ctx context.Context, items []queue.Item) bool {
@@ -247,6 +273,21 @@ func (u *Uploader) sendMetricsBatch(ctx context.Context, items []queue.MetricIte
 		u.counters.Add(counters.MetricsUploaded, int64(counts.Accepted))
 	}
 	u.counters.Set(counters.LastUploadAt, u.now().Unix())
+	return true
+}
+
+func (u *Uploader) sendSessionsBatch(ctx context.Context, items []queue.SessionItem) bool {
+	keys, sessions := splitSessions(items)
+	counts, err := u.client.SendSessions(ctx, u.collectorID, sessions)
+	if err != nil {
+		_ = u.queue.NackSessions(keys)
+		u.handleSendError(ctx, err)
+		return false
+	}
+	if err := u.queue.AckSessions(keys); err != nil {
+		u.logger.Error("ack sessions batch failed", "err", err)
+	}
+	u.onUploadSuccess(counts)
 	return true
 }
 
@@ -476,4 +517,14 @@ func splitMetrics(items []queue.MetricItem) ([]int64, []api.MetricPoint) {
 		points[i] = it.Point
 	}
 	return ids, points
+}
+
+func splitSessions(items []queue.SessionItem) ([]queue.SessionLease, []api.SessionSummary) {
+	keys := make([]queue.SessionLease, len(items))
+	sessions := make([]api.SessionSummary, len(items))
+	for i, item := range items {
+		keys[i] = queue.SessionLease{SessionID: item.SessionID, Revision: item.Revision}
+		sessions[i] = item.Summary
+	}
+	return keys, sessions
 }

@@ -50,8 +50,11 @@ type mockBackend struct {
 
 	// recordedMetrics counts accepted points by metric_name, mirroring
 	// recorded for events.
-	recordedMetrics map[string]int
-	metricsPosts    int
+	recordedMetrics  map[string]int
+	metricsPosts     int
+	recordedSessions map[string]int
+	sessionPosts     int
+	sessionsDown     bool
 
 	// dedupeSeen tracks event_ids already accepted, mirroring the backend's
 	// per-org dedupe window (yaah-hosted#24): a replayed event_id is counted as
@@ -92,9 +95,10 @@ func acceptsKey(accepted map[string]bool, r *http.Request) bool {
 
 func newMockBackend() *mockBackend {
 	return &mockBackend{
-		recorded:        make(map[string]int),
-		recordedMetrics: make(map[string]int),
-		policy:          api.Policy{FlushIntervalSeconds: 30, MaxBatchSize: 50},
+		recorded:         make(map[string]int),
+		recordedMetrics:  make(map[string]int),
+		recordedSessions: make(map[string]int),
+		policy:           api.Policy{FlushIntervalSeconds: 30, MaxBatchSize: 50},
 	}
 }
 
@@ -104,6 +108,7 @@ func (m *mockBackend) server(t *testing.T) *httptest.Server {
 	mux.HandleFunc("/ingest/v1/heartbeat", m.handleHeartbeat)
 	mux.HandleFunc("/ingest/v1/events", m.handleEvents)
 	mux.HandleFunc("/ingest/v1/metrics", m.handleMetrics)
+	mux.HandleFunc("/ingest/v1/sessions", m.handleSessions)
 	mux.HandleFunc("/ingest/v1/keys/rotate", m.handleRotate)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -183,6 +188,28 @@ func (m *mockBackend) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		m.recordedMetrics[p.MetricName]++
 	}
 	_ = json.NewEncoder(w).Encode(api.Counts{Accepted: len(req.Points)})
+}
+
+func (m *mockBackend) handleSessions(w http.ResponseWriter, r *http.Request) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sessionPosts++
+	if m.eventsAuthFail || !acceptsKey(m.acceptedKeys, r) {
+		m.writeAuthReject(w, "invalid collector key")
+		return
+	}
+	if m.sessionsDown {
+		writeErr(w, http.StatusInternalServerError, "boom")
+		return
+	}
+	var req struct {
+		Sessions []api.SessionSummary `json:"sessions"`
+	}
+	_ = json.NewDecoder(requestBody(r)).Decode(&req)
+	for _, summary := range req.Sessions {
+		m.recordedSessions[summary.SessionID]++
+	}
+	_ = json.NewEncoder(w).Encode(api.Counts{Accepted: len(req.Sessions)})
 }
 
 func (m *mockBackend) handleRotate(w http.ResponseWriter, r *http.Request) {
@@ -341,6 +368,38 @@ func TestFlushMetricsOnceDrainsQueueToBackend(t *testing.T) {
 	}
 	if mock.metricsPosts != 1 {
 		t.Errorf("metrics posts = %d, want 1 (one batch)", mock.metricsPosts)
+	}
+}
+
+func TestFlushSessionsRetriesDurablyThenAcks(t *testing.T) {
+	mock := newMockBackend()
+	srv := mock.server(t)
+	up, q, _ := testDeps(t, mock, srv.URL)
+	session, model := "session-1", "gpt-5.6-sol"
+	input := int64(10)
+	if _, err := q.UpsertSessionEvents([]api.NormalizedEvent{{
+		SessionID: &session, Model: &model, InputTokens: &input,
+	}}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	mock.mu.Lock()
+	mock.sessionsDown = true
+	mock.mu.Unlock()
+	up.FlushSessionsOnce(context.Background())
+	mock.mu.Lock()
+	mock.sessionsDown = false
+	mock.mu.Unlock()
+	up.FlushSessionsOnce(context.Background())
+
+	remaining, err := q.LeaseSessionsBatch(10, leaseDuration)
+	if err != nil || len(remaining) != 0 {
+		t.Fatalf("remaining sessions = %d, %v", len(remaining), err)
+	}
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	if mock.recordedSessions[session] != 1 || mock.sessionPosts < 2 {
+		t.Fatalf("recorded/posts = %#v/%d", mock.recordedSessions, mock.sessionPosts)
 	}
 }
 

@@ -145,6 +145,14 @@ func (d *Daemon) handleLogs(payload map[string]any) (accepted, dropped int) {
 	d.counters.Add(counters.Normalized, int64(len(events)))
 	kept := d.filter.Apply(events)
 	d.counters.Add(counters.Filtered, int64(len(events)-len(kept)))
+	// Session summaries fold the full normalized metadata stream before the
+	// event noise filter. Dropped token-bearing events are represented in the
+	// upload stream by aggregate rollups, so this keeps session token totals
+	// reconcilable without retaining or uploading their raw payloads.
+	if _, err := d.queue.UpsertSessionEvents(events, time.Now()); err != nil {
+		d.counters.Add(counters.Errors, 1)
+		d.logger.Error("session summary upsert failed", "err", err)
+	}
 	toEnqueue := append(kept, d.dueRollups()...)
 	if err := d.queue.Enqueue(toEnqueue); err != nil {
 		d.counters.Add(counters.Errors, 1)
@@ -269,6 +277,15 @@ func (d *Daemon) pruneOnce() {
 	if deletedMetrics > 0 {
 		d.logger.Info("retention pruned acked metric rows",
 			"deleted", deletedMetrics, "retention_days", d.retentionDays)
+	}
+	deletedSessions, err := d.queue.PruneAckedSessions(cutoff)
+	if err != nil {
+		d.logger.Error("session retention prune failed", "err", err)
+		return
+	}
+	if deletedSessions > 0 {
+		d.logger.Info("retention pruned acked session rows",
+			"deleted", deletedSessions, "retention_days", d.retentionDays)
 	}
 }
 

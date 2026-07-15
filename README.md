@@ -38,6 +38,9 @@ The receiver binds loopback only and refuses any non-loopback bind. Normalizatio
 copies a fixed allowlist of metadata fields out of each event and drops
 everything else. The queue is a local SQLite database that survives restarts and
 network outages; the uploader drains it on the cadence set by the backend policy.
+The daemon also builds revisioned session summaries from that same metadata
+allowlist and uploads them idempotently; it never reads prompt or completion
+content to do so.
 
 ## Install
 
