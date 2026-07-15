@@ -18,6 +18,12 @@ const (
 	filePerm = 0o600
 	// EnvConfigDir overrides the config directory (used by tests and doctor).
 	EnvConfigDir = "BURNDOWN_CONFIG_DIR"
+	// DefaultAPIURL is the canonical Agent Burndown collector endpoint.
+	DefaultAPIURL = "https://collector.agentburndown.com"
+	// legacyDefaultAPIURL was the client default before the dedicated collector
+	// hostname was introduced. Exact matches are migrated on load; custom URLs
+	// remain untouched.
+	legacyDefaultAPIURL = "https://app.agentburndown.com"
 )
 
 // knownFields lists the JSON keys represented by typed Config fields. Any other
@@ -205,7 +211,9 @@ func NewFileStore() (*FileStore, error) {
 func (s *FileStore) Path() string { return s.path }
 
 // Load reads and decodes the config file, repairing its permissions to 0600.
-// A missing file yields an error that satisfies errors.Is(err, os.ErrNotExist).
+// Configs using the former default API URL are atomically migrated to the
+// dedicated collector endpoint. A missing file yields an error that satisfies
+// errors.Is(err, os.ErrNotExist).
 func (s *FileStore) Load() (*Config, error) {
 	data, err := os.ReadFile(s.path)
 	if err != nil {
@@ -222,6 +230,12 @@ func (s *FileStore) Load() (*Config, error) {
 		return nil, fmt.Errorf(
 			"config at %s is corrupt; delete it and re-run login to recreate it: %w",
 			s.path, err)
+	}
+	if cfg.APIURL == legacyDefaultAPIURL {
+		cfg.APIURL = DefaultAPIURL
+		if err := s.Save(&cfg); err != nil {
+			return nil, fmt.Errorf("migrate api_url in %s: %w", s.path, err)
+		}
 	}
 	return &cfg, nil
 }

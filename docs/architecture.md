@@ -11,7 +11,7 @@ flowchart LR
     N --> F[filter]
     F --> Q[("queue<br/>~/.burndown/queue.db")]
     Q --> U[uploader]
-    U -->|"POST /ingest/v1/events"| B["app.agentburndown.com"]
+    U -->|"POST /ingest/v1/events"| B["collector.agentburndown.com"]
 ```
 
 ## Stages

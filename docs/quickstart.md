@@ -46,6 +46,10 @@ Override the backend with `--api-url` if you are pointing at a non-default
 environment. If your key ever changes, run `login` again; use `register` to
 refresh the collector id and policy without re-entering the key.
 
+Clients upgrading from a release that used `https://app.agentburndown.com` as
+the default automatically migrate that exact stored URL to the dedicated
+`https://collector.agentburndown.com` endpoint. Custom URLs are preserved.
+
 ## 3. Configure your agents
 
 `setup` detects Claude Code and Codex and adds the OTEL settings that point them
@@ -117,7 +121,7 @@ burndown-cli doctor
 ```
 [pass] version    running dev; no published releases yet
 [pass] config     present, key set, permissions 0600/0700
-[pass] backend    reachable at https://app.agentburndown.com
+[pass] backend    reachable at https://collector.agentburndown.com
 [pass] heartbeat  ok (collector_id 1)
 [pass] daemon     listening on 127.0.0.1:8765
 [pass] agents     OTEL configured: Claude Code, Codex

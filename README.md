@@ -7,7 +7,7 @@
 Local telemetry collector for coding agents. It runs on your machine, receives
 OTLP telemetry from Claude Code and Codex on `127.0.0.1:8765`, keeps only
 metadata, and uploads that metadata to the Agent Burn Down backend at
-`app.agentburndown.com`.
+`collector.agentburndown.com`.
 
 Metadata-only by design: no prompt text, completion text, tool payloads, or file
 contents ever leave your machine. See [Privacy](#privacy).
@@ -28,7 +28,7 @@ contents ever leave your machine. See [Privacy](#privacy).
 The collector runs as a background daemon. Its pipeline is:
 
 ```
-Claude Code / Codex --OTLP--> receiver --> normalize --> filter --> queue --> uploader --> app.agentburndown.com
+Claude Code / Codex --OTLP--> receiver --> normalize --> filter --> queue --> uploader --> collector.agentburndown.com
                              (127.0.0.1:8765)         (metadata allowlist)  (~/.burndown/queue.db)
 ```
 
@@ -156,7 +156,7 @@ burndown-cli doctor
 ```
 [pass] version    running dev; no published releases yet
 [pass] config     present, key set, permissions 0600/0700
-[pass] backend    reachable at https://app.agentburndown.com
+[pass] backend    reachable at https://collector.agentburndown.com
 [pass] heartbeat  ok (collector_id 1)
 [pass] daemon     listening on 127.0.0.1:8765
 [pass] agents     OTEL configured: Claude Code, Codex

@@ -20,9 +20,6 @@ import (
 	"github.com/agent-burn-down/desktop-client/internal/platform"
 )
 
-// defaultAPIURL is the backend base URL used when --api-url is not given.
-const defaultAPIURL = "https://app.agentburndown.com"
-
 // keyPrefixLen is the number of leading characters of a collector key that are
 // safe to display (abd_ + a few chars, or the longer legacy yaahc_ prefix).
 // The full secret is never printed.
@@ -64,7 +61,7 @@ func newLoginCmd() *cobra.Command {
 	cmd.Flags().StringVar(&key, "key", "", "collector key (abd_...); use for headless/CI login")
 	cmd.Flags().StringVar(&machine, "machine", "", "machine name (default: hostname)")
 	cmd.Flags().StringVar(&email, "email", "", "reporting user email; prompted if omitted")
-	cmd.Flags().StringVar(&apiURL, "api-url", defaultAPIURL, "backend base URL")
+	cmd.Flags().StringVar(&apiURL, "api-url", config.DefaultAPIURL, "backend base URL")
 	cmd.Flags().BoolVar(&device, "device", false,
 		"force the device-code flow even if stdin is not a terminal")
 	return cmd
