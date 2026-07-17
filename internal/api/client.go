@@ -207,6 +207,11 @@ func (c *Client) Heartbeat(
 
 // SendEvents posts a batch of normalized events. Batches larger than
 // MaxIngestBatch are rejected client-side before any request is made.
+//
+// The envelope carries collector_version (this client's build string, the same
+// value sent as version on /ingest/v1/register) so the backend can facet
+// usage rollups by the collector build that produced them. It is a single
+// batch-level field, not per-event; older servers ignore it.
 func (c *Client) SendEvents(
 	ctx context.Context, collectorID int64, events []NormalizedEvent,
 ) (*Counts, error) {
@@ -215,7 +220,11 @@ func (c *Client) SendEvents(
 			"batch of %d events exceeds max %d; split before sending",
 			len(events), MaxIngestBatch)
 	}
-	body := map[string]any{"collector_id": collectorID, "events": events}
+	body := map[string]any{
+		"collector_id":      collectorID,
+		"collector_version": version.Version,
+		"events":            events,
+	}
 	var out Counts
 	if err := c.postJSON(ctx, "/ingest/v1/events", body, &out); err != nil {
 		return nil, err

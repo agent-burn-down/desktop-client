@@ -43,6 +43,11 @@ and it drops absolute repository paths and composite `mixed:` model labels.
 On the Codex side, `setup` also writes `log_user_prompt = false`, so Codex does
 not emit prompt text to the collector in the first place.
 
+Each events batch is transmitted with the collector's own build version (the
+same version string reported at registration). This lets the backend attribute
+usage to the collector build that produced it; it carries no information about
+your machine, code, or agent activity.
+
 ## Enforced by construction
 
 This is a structural guarantee, not a policy. The normalizer names each field it

@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/agent-burn-down/desktop-client/internal/version"
 )
 
 // newTestClient returns a client pointed at srv with instant (no-op) backoff so
@@ -127,6 +129,9 @@ func TestSendEventsHappyPath(t *testing.T) {
 	}
 	if gotBody["collector_id"] != float64(123) {
 		t.Errorf("collector_id = %v, want 123", gotBody["collector_id"])
+	}
+	if gotBody["collector_version"] != version.Version {
+		t.Errorf("collector_version = %v, want %q", gotBody["collector_version"], version.Version)
 	}
 	evs, ok := gotBody["events"].([]any)
 	if !ok || len(evs) != 2 {
