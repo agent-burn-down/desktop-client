@@ -324,9 +324,9 @@ func assertFieldValues(t *testing.T, events []api.NormalizedEvent) {
 	var apiReq, toolUse *api.NormalizedEvent
 	for i := range events {
 		switch derefStr(events[i].EventName) {
-		case "api_request":
+		case "claude_code.api_request":
 			apiReq = &events[i]
-		case "tool_use":
+		case "claude_code.tool_use":
 			toolUse = &events[i]
 		}
 	}
