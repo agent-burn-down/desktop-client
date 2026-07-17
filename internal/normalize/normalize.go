@@ -98,13 +98,23 @@ func eventTimestamp(attrs, record map[string]any) *string {
 	return &now
 }
 
-// normalizeEventName preserves agent namespaces such as "codex." so the
-// hosted rollup store can derive the correct source. Empty or non-string names
-// are dropped by returning nil.
+// claudeNamespace prefixes Claude Code's bare log event names. The hosted
+// rollup store derives an event's source from the namespace before the first
+// ".", so a bare name ("api_request") must be namespaced to attribute usage to
+// Claude Code.
+const claudeNamespace = "claude_code."
+
+// normalizeEventName preserves agent namespaces such as "codex." and adds the
+// "claude_code." namespace to Claude Code's bare event names (which arrive
+// unprefixed) so the hosted rollup store can derive the correct source. Empty
+// or non-string names are dropped by returning nil.
 func normalizeEventName(v any) *string {
 	s, ok := v.(string)
 	if !ok || s == "" || s == "codex." {
 		return nil
+	}
+	if !strings.Contains(s, ".") {
+		s = claudeNamespace + s
 	}
 	return &s
 }

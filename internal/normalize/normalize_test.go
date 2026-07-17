@@ -129,7 +129,7 @@ func TestNormalizeLogBatchCounts(t *testing.T) {
 
 func TestNormalizeLogBatchAPIRequestShape(t *testing.T) {
 	events, _ := NormalizeLogBatch(realisticPayload, "yaah-hosted")
-	ev := findEvent(t, events, "api_request")
+	ev := findEvent(t, events, "claude_code.api_request")
 	assertStr(t, "session_id", ev.SessionID, "sess-abc123")
 	assertStr(t, "model", ev.Model, "claude-opus-4-8")
 	assertInt(t, "input_tokens", ev.InputTokens, 1200)
@@ -140,7 +140,7 @@ func TestNormalizeLogBatchAPIRequestShape(t *testing.T) {
 
 func TestNormalizeLogBatchToolUseShape(t *testing.T) {
 	events, _ := NormalizeLogBatch(realisticPayload, "yaah-hosted")
-	ev := findEvent(t, events, "tool_use")
+	ev := findEvent(t, events, "claude_code.tool_use")
 	assertStr(t, "tool_name", ev.ToolName, "bash")
 	if ev.ToolSuccess == nil || !*ev.ToolSuccess {
 		t.Fatalf("tool_success = %v, want true", ev.ToolSuccess)
@@ -216,6 +216,33 @@ func TestNormalizeEventNameCodexPrefix(t *testing.T) {
 		t.Fatalf("want 1 event, got %d", len(events))
 	}
 	assertStr(t, "event_name", events[0].EventName, "codex.api_request")
+}
+
+func TestNormalizeEventNameClaudeBareGetsNamespaced(t *testing.T) {
+	payload := map[string]any{
+		"resourceLogs": []any{
+			map[string]any{
+				"scopeLogs": []any{
+					map[string]any{
+						"logRecords": []any{
+							map[string]any{
+								"timeUnixNano": "1750000000000000000",
+								"attributes": []any{
+									attr("event.name", "stringValue", "api_request"),
+									attr("model", "stringValue", "claude-opus-4-8"),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	events, _ := NormalizeLogBatch(payload, "")
+	if len(events) != 1 {
+		t.Fatalf("want 1 event, got %d", len(events))
+	}
+	assertStr(t, "event_name", events[0].EventName, "claude_code.api_request")
 }
 
 func TestCodexErrorMessageAliasAndPrivacy(t *testing.T) {
