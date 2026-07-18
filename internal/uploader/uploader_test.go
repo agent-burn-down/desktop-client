@@ -61,6 +61,10 @@ type mockBackend struct {
 	// a duplicate instead of being recorded again.
 	dedupeSeen map[string]bool
 
+	// dedupeSeenPoints mirrors dedupeSeen for metric points, keyed by point_id
+	// (issue #55).
+	dedupeSeenPoints map[string]bool
+
 	// lastHeartbeat is the raw JSON body of the most recent heartbeat request,
 	// so tests can assert the optional self-telemetry counters it carries.
 	lastHeartbeat map[string]json.RawMessage
@@ -184,10 +188,22 @@ func (m *mockBackend) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		Points []api.MetricPoint `json:"points"`
 	}
 	_ = json.NewDecoder(requestBody(r)).Decode(&req)
+	if m.dedupeSeenPoints == nil {
+		m.dedupeSeenPoints = make(map[string]bool)
+	}
+	var accepted, duplicates int
 	for _, p := range req.Points {
+		if p.PointID != nil {
+			if m.dedupeSeenPoints[*p.PointID] {
+				duplicates++
+				continue
+			}
+			m.dedupeSeenPoints[*p.PointID] = true
+		}
+		accepted++
 		m.recordedMetrics[p.MetricName]++
 	}
-	_ = json.NewEncoder(w).Encode(api.Counts{Accepted: len(req.Points)})
+	_ = json.NewEncoder(w).Encode(api.Counts{Accepted: accepted, Duplicates: duplicates})
 }
 
 func (m *mockBackend) handleSessions(w http.ResponseWriter, r *http.Request) {
@@ -271,6 +287,15 @@ func markedEvents(n int) []api.NormalizedEvent {
 		out[i] = api.NormalizedEvent{EventName: &name, SessionID: &id}
 	}
 	return out
+}
+
+// samplePoints returns n metric points suitable for enqueueing in tests.
+func samplePoints(n int) []api.MetricPoint {
+	points := make([]api.MetricPoint, n)
+	for i := range points {
+		points[i] = api.MetricPoint{MetricName: "claude_code.commit.count", Value: float64(i + 1)}
+	}
+	return points
 }
 
 func testDeps(t *testing.T, mock *mockBackend, baseURL string) (*Uploader, *queue.Queue, *counters.Registry) {
@@ -457,6 +482,55 @@ func TestReplayDedupedByEventID(t *testing.T) {
 	}
 	if dupes != 0 {
 		t.Fatalf("%d events recorded more than once; replay must not double-count", dupes)
+	}
+}
+
+// TestReplayDedupedByPointID proves a crash-after-send-before-ack replay of a
+// metrics batch is not double-counted, mirroring TestReplayDedupedByEventID
+// (issue #55): the queue never re-mints point_id across leases, so when a
+// delivered batch never gets acked and is later re-leased and resent, the
+// backend's point_id dedupe (simulated by mockBackend) recognizes the replay.
+func TestReplayDedupedByPointID(t *testing.T) {
+	mock := newMockBackend()
+	srv := mock.server(t)
+	up, q, _ := testDeps(t, mock, srv.URL)
+	ctx := context.Background()
+
+	const total = 10
+	if err := q.EnqueueMetrics(samplePoints(total)); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := q.LeaseMetricsBatch(total, leaseDuration)
+	if err != nil || len(items) != total {
+		t.Fatalf("LeaseMetricsBatch: %v (got %d items)", err, len(items))
+	}
+	ids, points := splitMetrics(items)
+	counts, err := up.client.SendMetrics(ctx, up.collectorID, points)
+	if err != nil {
+		t.Fatalf("first SendMetrics: %v", err)
+	}
+	if counts.Accepted != total || counts.Duplicates != 0 {
+		t.Fatalf("first send counts = %+v, want accepted=%d duplicates=0", counts, total)
+	}
+
+	// Simulate a crash after the backend recorded the batch but before the
+	// queue AckMetrics landed: the row never acks, so it becomes leasable again.
+	if err := q.NackMetrics(ids); err != nil {
+		t.Fatalf("NackMetrics: %v", err)
+	}
+
+	replayItems, err := q.LeaseMetricsBatch(total, leaseDuration)
+	if err != nil || len(replayItems) != total {
+		t.Fatalf("replay LeaseMetricsBatch: %v (got %d items)", err, len(replayItems))
+	}
+	_, replayPoints := splitMetrics(replayItems)
+	replayCounts, err := up.client.SendMetrics(ctx, up.collectorID, replayPoints)
+	if err != nil {
+		t.Fatalf("replay SendMetrics: %v", err)
+	}
+	if replayCounts.Accepted != 0 || replayCounts.Duplicates != total {
+		t.Fatalf("replay counts = %+v, want accepted=0 duplicates=%d", replayCounts, total)
 	}
 }
 

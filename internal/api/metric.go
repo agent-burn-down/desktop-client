@@ -11,4 +11,10 @@ type MetricPoint struct {
 	Model      *string `json:"model"`
 	Repo       *string `json:"repo"`
 	SessionID  *string `json:"session_id"`
+	// PointID is the client-minted UUIDv7 idempotency key (queue.MetricItem.
+	// PointID), attached when the queue hands a batch to the uploader — never
+	// set by the normalizer. Mirrors NormalizedEvent.EventID: identical
+	// point_ids within the backend's dedupe window are counted once, so a
+	// crash-after-send-before-ack replay is never double-counted.
+	PointID *string `json:"point_id"`
 }
