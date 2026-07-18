@@ -14,6 +14,7 @@ import (
 	"github.com/agent-burn-down/desktop-client/internal/counters"
 	"github.com/agent-burn-down/desktop-client/internal/platform"
 	"github.com/agent-burn-down/desktop-client/internal/queue"
+	"github.com/agent-burn-down/desktop-client/internal/setup"
 	"github.com/agent-burn-down/desktop-client/internal/version"
 )
 
@@ -304,6 +305,35 @@ func TestCheckAgents(t *testing.T) {
 	r := checkAgents(8765)
 	if r.Status != Fail || r.Hint == "" {
 		t.Errorf("misconfigured agents should fail with hint: %+v", r)
+	}
+}
+
+// TestCheckAgentsAcceptsSetupWriterOutput reproduces #59's second defect:
+// checkAgents must accept exactly what `setup` itself wrote for the same
+// port, and only that port. Probing at a different port (the drift the issue
+// reported) must still fail, since the exporter endpoint would then genuinely
+// mismatch what's on disk.
+func TestCheckAgentsAcceptsSetupWriterOutput(t *testing.T) {
+	codexDir := t.TempDir()
+	missingClaudeDir := filepath.Join(t.TempDir(), "does-not-exist")
+	t.Setenv("BURNDOWN_CODEX_DIR", codexDir)
+	t.Setenv("BURNDOWN_CLAUDE_DIR", missingClaudeDir)
+	t.Setenv("PATH", "")
+
+	const port = 8766
+	plan, err := setup.PlanCodex(port)
+	if err != nil {
+		t.Fatalf("PlanCodex: %v", err)
+	}
+	if _, err := plan.Apply(); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	if r := checkAgents(port); r.Status != Pass {
+		t.Errorf("doctor should accept setup's own output at the same port: %+v", r)
+	}
+	if r := checkAgents(port + 1); r.Status != Fail {
+		t.Errorf("mismatched port should still fail: %+v", r)
 	}
 }
 

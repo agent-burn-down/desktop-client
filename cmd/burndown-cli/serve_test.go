@@ -185,6 +185,45 @@ func realisticCodexOTel(conversationID string) map[string]any {
 	}}}
 }
 
+// TestRunServePersistsReceiverPort proves serve records the port it actually
+// started on into config.json, so a later doctor/status without an explicit
+// --port can still find the daemon (issue #59).
+func TestRunServePersistsReceiverPort(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv(config.EnvConfigDir, configDir)
+	store, err := config.NewFileStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(api.HeartbeatOut{OK: true})
+	}))
+	defer backend.Close()
+	if err := store.Save(&config.Config{
+		APIURL: backend.URL, CollectorKey: testKey, CollectorID: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	port := unusedPort(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runServe(ctx, port, false) }()
+	waitHTTP(t, "http://127.0.0.1:"+fmt.Sprint(port)+"/healthz")
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("runServe: %v", err)
+	}
+
+	got, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.ReceiverPort != port {
+		t.Errorf("ReceiverPort = %d, want %d", got.ReceiverPort, port)
+	}
+}
+
 func unusedPort(t *testing.T) int {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

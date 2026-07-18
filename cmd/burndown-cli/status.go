@@ -26,7 +26,7 @@ func newStatusCmd() *cobra.Command {
 		Short: "Show collector daemon state, counters, and configuration",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runStatus(cmd, port, asJSON)
+			return runStatus(cmd, resolvePort(cmd, port), asJSON)
 		},
 	}
 	cmd.Flags().IntVar(&port, "port", receiver.DefaultPort, "loopback port of the OTLP receiver")

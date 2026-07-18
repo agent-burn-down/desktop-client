@@ -45,6 +45,7 @@ var knownFields = map[string]struct{}{
 	"last_rotation_at":       {},
 	"rotation_failures":      {},
 	"auth_reason":            {},
+	"receiver_port":          {},
 }
 
 const (
@@ -99,6 +100,12 @@ type Config struct {
 	// Degraded mode (key_revoked/key_invalid); empty while Active. Persisted
 	// so status/doctor are accurate even when the daemon is not running.
 	AuthReason string `json:"auth_reason,omitempty"`
+	// ReceiverPort is the loopback OTLP receiver port `serve` last started on.
+	// It lets `doctor`/`status` probe the right port when the daemon was
+	// started with a non-default --port (for example via a hand-edited
+	// launchd plist), since that flag is otherwise known only to the running
+	// process's argv.
+	ReceiverPort int `json:"receiver_port,omitempty"`
 
 	// extra holds JSON fields not represented by the typed fields above, so
 	// they survive a load/save round-trip.

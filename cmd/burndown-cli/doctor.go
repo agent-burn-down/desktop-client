@@ -25,7 +25,7 @@ func newDoctorCmd() *cobra.Command {
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runDoctor(cmd, port, asJSON)
+			return runDoctor(cmd, resolvePort(cmd, port), asJSON)
 		},
 	}
 	cmd.Flags().IntVar(&port, "port", receiver.DefaultPort, "loopback port of the OTLP receiver")
