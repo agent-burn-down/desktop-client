@@ -508,13 +508,19 @@ func split(items []queue.Item) ([]int64, []api.NormalizedEvent) {
 }
 
 // splitMetrics separates leased metrics items into their row ids and points,
-// preserving order.
+// preserving order, and attaches each item's queue-minted PointID as the wire
+// point_id so retries after a crash-after-send-before-ack reuse the same
+// idempotency key and the backend dedupes them. Rows enqueued before this key
+// existed (queue.MetricItem.PointID == "") are sent keyless, same as before.
 func splitMetrics(items []queue.MetricItem) ([]int64, []api.MetricPoint) {
 	ids := make([]int64, len(items))
 	points := make([]api.MetricPoint, len(items))
 	for i, it := range items {
 		ids[i] = it.ID
 		points[i] = it.Point
+		if items[i].PointID != "" {
+			points[i].PointID = &items[i].PointID
+		}
 	}
 	return ids, points
 }

@@ -7,19 +7,20 @@ import (
 	"time"
 
 	"github.com/agent-burn-down/desktop-client/internal/api"
+	"github.com/google/uuid"
 )
 
 // MetricItem is a leased metrics_queue row handed to the uploader.
 type MetricItem struct {
 	ID       int64
+	PointID  string
 	Point    api.MetricPoint
 	Attempts int
 }
 
 // initMetrics creates the metrics_queue table and its index, mirroring the
-// queue table's state machine (pending -> leased -> acked). Metric points
-// carry no server-side idempotency key (unlike events' event_id), so there is
-// no equivalent column here.
+// queue table's state machine (pending -> leased -> acked), then migrates in
+// the point_id idempotency column for databases created before it existed.
 func (q *Queue) initMetrics() error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS metrics_queue (
@@ -29,7 +30,8 @@ func (q *Queue) initMetrics() error {
 			attempts INTEGER NOT NULL DEFAULT 0,
 			state TEXT NOT NULL DEFAULT 'pending',
 			leased_until TEXT,
-			acked_at TEXT
+			acked_at TEXT,
+			point_id TEXT
 		)`,
 		"CREATE INDEX IF NOT EXISTS idx_metrics_queue_state ON metrics_queue(state, id)",
 	}
@@ -38,7 +40,48 @@ func (q *Queue) initMetrics() error {
 			return fmt.Errorf("init metrics_queue schema: %w", err)
 		}
 	}
+	return q.migrateMetricsPointID()
+}
+
+// migrateMetricsPointID adds the point_id column to a metrics_queue table
+// created before this idempotency key existed. Existing pending/leased rows
+// are left with a NULL point_id; the backend treats a missing key as
+// first-seen, so those rows are still delivered correctly, just without
+// dedup protection on their first replay.
+func (q *Queue) migrateMetricsPointID() error {
+	has, err := q.hasColumn("metrics_queue", "point_id")
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	if _, err := q.db.Exec("ALTER TABLE metrics_queue ADD COLUMN point_id TEXT"); err != nil {
+		return fmt.Errorf("migrate metrics_queue point_id column: %w", err)
+	}
 	return nil
+}
+
+func (q *Queue) hasColumn(table, column string) (bool, error) {
+	//nolint:gosec // G202: table/column are fixed internal literals, never caller/user input
+	rows, err := q.db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return false, fmt.Errorf("inspect %s schema: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var cid int
+	var name, colType string
+	var notNull, pk int
+	var dflt sql.NullString
+	for rows.Next() {
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			return false, fmt.Errorf("scan %s column info: %w", table, err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // EnqueueMetrics marshals each point and appends it as a pending metrics_queue
@@ -65,7 +108,8 @@ func (q *Queue) EnqueueMetrics(points []api.MetricPoint) error {
 }
 
 func insertMetrics(tx *sql.Tx, points []api.MetricPoint, now string) error {
-	stmt, err := tx.Prepare("INSERT INTO metrics_queue(payload, created_at) VALUES(?, ?)")
+	stmt, err := tx.Prepare(
+		"INSERT INTO metrics_queue(payload, created_at, point_id) VALUES(?, ?, ?)")
 	if err != nil {
 		return fmt.Errorf("prepare insert metrics: %w", err)
 	}
@@ -75,7 +119,11 @@ func insertMetrics(tx *sql.Tx, points []api.MetricPoint, now string) error {
 		if err != nil {
 			return fmt.Errorf("marshal metric point: %w", err)
 		}
-		if _, err := stmt.Exec(string(payload), now); err != nil {
+		id, err := uuid.NewV7()
+		if err != nil {
+			return fmt.Errorf("mint point id: %w", err)
+		}
+		if _, err := stmt.Exec(string(payload), now, id.String()); err != nil {
 			return fmt.Errorf("insert metric point: %w", err)
 		}
 	}
@@ -109,7 +157,7 @@ func (q *Queue) LeaseMetricsBatch(n int, leaseDur time.Duration) ([]MetricItem, 
 
 func (q *Queue) selectLeasableMetrics(now time.Time, n int) ([]int64, []MetricItem, error) {
 	rows, err := q.db.Query(
-		`SELECT id, payload, attempts FROM metrics_queue
+		`SELECT id, payload, attempts, point_id FROM metrics_queue
 		 WHERE state='pending' OR (state='leased' AND (leased_until IS NULL OR leased_until < ?))
 		 ORDER BY id ASC LIMIT ?`,
 		now.Format(timeLayout), n)
@@ -133,12 +181,14 @@ func (q *Queue) selectLeasableMetrics(now time.Time, n int) ([]int64, []MetricIt
 func scanMetricItem(rows *sql.Rows) (MetricItem, error) {
 	var it MetricItem
 	var payload string
-	if err := rows.Scan(&it.ID, &payload, &it.Attempts); err != nil {
+	var pointID sql.NullString
+	if err := rows.Scan(&it.ID, &payload, &it.Attempts, &pointID); err != nil {
 		return MetricItem{}, fmt.Errorf("scan metric item: %w", err)
 	}
 	if err := json.Unmarshal([]byte(payload), &it.Point); err != nil {
 		return MetricItem{}, fmt.Errorf("unmarshal payload for metrics row %d: %w", it.ID, err)
 	}
+	it.PointID = pointID.String
 	return it, nil
 }
 
