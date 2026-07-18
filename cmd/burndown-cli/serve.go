@@ -47,6 +47,9 @@ func runServe(ctx context.Context, port int, verbose bool) error {
 	if err != nil {
 		return err
 	}
+	if err := persistReceiverPort(store, cfg, port); err != nil {
+		return err
+	}
 	d, err := daemon.New(daemon.Options{
 		Config: cfg, Store: store, Port: port, Verbose: verbose,
 	})
@@ -71,4 +74,16 @@ func loadServeConfig(store config.Store) (*config.Config, error) {
 				"run `burndown-cli login` to register this collector first")
 	}
 	return cfg, nil
+}
+
+// persistReceiverPort records the port the receiver is starting on so
+// `doctor`/`status` can find it later even when invoked without an explicit
+// --port. It is a no-op when the port has not changed, avoiding a redundant
+// config write on every restart.
+func persistReceiverPort(store config.Store, cfg *config.Config, port int) error {
+	if cfg.ReceiverPort == port {
+		return nil
+	}
+	cfg.ReceiverPort = port
+	return store.Save(cfg)
 }

@@ -52,6 +52,20 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
+func TestReceiverPortRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Save(&Config{APIURL: "https://api.example.com", ReceiverPort: 8766}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := s.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.ReceiverPort != 8766 {
+		t.Errorf("ReceiverPort round-trip = %d, want 8766", got.ReceiverPort)
+	}
+}
+
 func TestPermissionsOnCreate(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.Save(&Config{Machine: "m"}); err != nil {

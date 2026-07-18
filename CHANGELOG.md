@@ -4,6 +4,13 @@ All notable changes to `burndown-cli` are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- `doctor` and `status` now probe the receiver port `serve` last actually ran
+  on (persisted to config.json), instead of always defaulting to 8765. This
+  also fixes `doctor` incorrectly flagging Codex OTEL settings as missing when
+  they were written for a non-default port (#59).
+
 ### Changed
 
 - Document installing from the prebuilt release binaries so a new machine can
