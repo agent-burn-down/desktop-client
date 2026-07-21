@@ -38,10 +38,14 @@ var openURL = platform.OpenURL
 // production (time.Sleep), a no-op in tests so polling doesn't take real time.
 var devicePollSleep func(time.Duration)
 
+// loginAPIURL is a package variable only so tests can point the command at an
+// httptest server. Production builds never expose an endpoint override.
+var loginAPIURL = config.DefaultAPIURL
+
 // newLoginCmd builds the `login` command: pair via the device-code flow by
 // default, falling back to a pasted/piped collector key for headless/CI use.
 func newLoginCmd() *cobra.Command {
-	var key, machine, email, apiURL string
+	var key, machine, email string
 	var device bool
 	cmd := &cobra.Command{
 		Use:   "login",
@@ -54,14 +58,13 @@ func newLoginCmd() *cobra.Command {
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runLogin(cmd, loginInput{
-				key: key, machine: machine, email: email, apiURL: apiURL, device: device,
+				key: key, machine: machine, email: email, apiURL: loginAPIURL, device: device,
 			})
 		},
 	}
 	cmd.Flags().StringVar(&key, "key", "", "collector key (abd_...); use for headless/CI login")
 	cmd.Flags().StringVar(&machine, "machine", "", "machine name (default: hostname)")
 	cmd.Flags().StringVar(&email, "email", "", "reporting user email; prompted if omitted")
-	cmd.Flags().StringVar(&apiURL, "api-url", config.DefaultAPIURL, "backend base URL")
 	cmd.Flags().BoolVar(&device, "device", false,
 		"force the device-code flow even if stdin is not a terminal")
 	return cmd

@@ -57,16 +57,14 @@ is on hold pending Apple Developer ID signing.
 
 ### Prebuilt binary (recommended)
 
-Every release ships prebuilt macOS binaries, so you can install without a repo
-checkout. Pick `arm64` for Apple silicon or `amd64` for Intel:
+The installer selects the correct Apple silicon or Intel archive, verifies its
+published checksum, and installs the CLI into the standard binary directory:
 
 ```
-ARCH=arm64   # Intel Macs: amd64
-REPO=agent-burn-down/desktop-client
-TAG=$(curl -fsSL https://api.github.com/repos/$REPO/releases/latest | grep -m1 '"tag_name"' | cut -d'"' -f4)
-curl -fsSL "https://github.com/$REPO/releases/download/$TAG/burndown-cli_${TAG#v}_darwin_${ARCH}.tar.gz" | tar -xzf - burndown-cli
-sudo mv burndown-cli /usr/local/bin/
+curl -fsSL https://github.com/agent-burn-down/desktop-client/releases/latest/download/install.sh | sh
 ```
+
+Set `BURNDOWN_INSTALL_DIR` to choose another writable destination.
 
 The binary is not notarized yet (issue #14). Fetching it with `curl` as shown
 avoids Gatekeeper quarantine; if you download the tarball through a browser

@@ -41,3 +41,5 @@ changelog:
 
 release:
   draft: false
+  extra_files:
+    - glob: ./install.sh

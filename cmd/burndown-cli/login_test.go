@@ -50,14 +50,20 @@ func runCmd(t *testing.T, args ...string) (stdout string, err error) {
 	return out.String(), err
 }
 
+func useLoginAPIURL(t *testing.T, apiURL string) {
+	t.Helper()
+	original := loginAPIURL
+	loginAPIURL = apiURL
+	t.Cleanup(func() { loginAPIURL = original })
+}
+
 func TestLoginDefaultsToCollectorEndpoint(t *testing.T) {
 	cmd := newLoginCmd()
-	got, err := cmd.Flags().GetString("api-url")
-	if err != nil {
-		t.Fatalf("read api-url flag: %v", err)
+	if flag := cmd.Flags().Lookup("api-url"); flag != nil {
+		t.Fatal("login must not expose an api-url override")
 	}
-	if got != config.DefaultAPIURL {
-		t.Errorf("api-url default = %q, want %q", got, config.DefaultAPIURL)
+	if loginAPIURL != config.DefaultAPIURL {
+		t.Errorf("login endpoint = %q, want %q", loginAPIURL, config.DefaultAPIURL)
 	}
 }
 
@@ -65,10 +71,11 @@ func TestLoginPersistsCredentialsPrefixOnly(t *testing.T) {
 	t.Setenv(config.EnvConfigDir, t.TempDir())
 	srv := fakeBackend(t)
 	defer srv.Close()
+	useLoginAPIURL(t, srv.URL)
 
 	out, err := runCmd(t,
 		"login", "--key", testKey, "--email", "dev@example.com",
-		"--machine", "laptop-1", "--api-url", srv.URL)
+		"--machine", "laptop-1")
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
@@ -102,10 +109,11 @@ func TestLoginBadKeyExitsWithMessage(t *testing.T) {
 	t.Setenv(config.EnvConfigDir, t.TempDir())
 	srv := fakeBackend(t)
 	defer srv.Close()
+	useLoginAPIURL(t, srv.URL)
 
 	_, err := runCmd(t,
 		"login", "--key", "yaahc_wrongkey", "--email", "dev@example.com",
-		"--machine", "laptop-1", "--api-url", srv.URL)
+		"--machine", "laptop-1")
 	if err == nil {
 		t.Fatal("expected a non-nil error for a rejected key")
 	}
@@ -122,6 +130,7 @@ func TestLoginKeyFromStdin(t *testing.T) {
 	t.Setenv(config.EnvConfigDir, t.TempDir())
 	srv := fakeBackend(t)
 	defer srv.Close()
+	useLoginAPIURL(t, srv.URL)
 
 	root := newRootCmd()
 	var out bytes.Buffer
@@ -129,7 +138,7 @@ func TestLoginKeyFromStdin(t *testing.T) {
 	root.SetErr(&bytes.Buffer{})
 	root.SetIn(strings.NewReader(testKey + "\n"))
 	root.SetArgs([]string{
-		"login", "--email", "dev@example.com", "--machine", "laptop-1", "--api-url", srv.URL,
+		"login", "--email", "dev@example.com", "--machine", "laptop-1",
 	})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("login via stdin: %v", err)
@@ -258,10 +267,10 @@ func TestDeviceLoginHappyPath(t *testing.T) {
 	openedURL := noOpenURL(t)
 	mock := &deviceMock{pollsBeforeResolve: 2, issuedKey: "abd_devicekey123456"}
 	srv := mock.server(t)
+	useLoginAPIURL(t, srv.URL)
 
 	out, err := runCmd(t,
-		"login", "--device", "--email", "dev@example.com", "--machine", "laptop-1",
-		"--api-url", srv.URL)
+		"login", "--device", "--email", "dev@example.com", "--machine", "laptop-1")
 	if err != nil {
 		t.Fatalf("device login: %v", err)
 	}
@@ -297,10 +306,10 @@ func TestDeviceLoginDenied(t *testing.T) {
 	noOpenURL(t)
 	mock := &deviceMock{outcome: "denied"}
 	srv := mock.server(t)
+	useLoginAPIURL(t, srv.URL)
 
 	_, err := runCmd(t,
-		"login", "--device", "--email", "dev@example.com", "--machine", "laptop-1",
-		"--api-url", srv.URL)
+		"login", "--device", "--email", "dev@example.com", "--machine", "laptop-1")
 	if err == nil || !strings.Contains(err.Error(), "denied") {
 		t.Fatalf("error = %v, want a denial message", err)
 	}
@@ -316,10 +325,10 @@ func TestDeviceLoginExpired(t *testing.T) {
 	noOpenURL(t)
 	mock := &deviceMock{outcome: "expired"}
 	srv := mock.server(t)
+	useLoginAPIURL(t, srv.URL)
 
 	_, err := runCmd(t,
-		"login", "--device", "--email", "dev@example.com", "--machine", "laptop-1",
-		"--api-url", srv.URL)
+		"login", "--device", "--email", "dev@example.com", "--machine", "laptop-1")
 	if err == nil || !strings.Contains(err.Error(), "expired") {
 		t.Fatalf("error = %v, want an expiry message", err)
 	}
@@ -331,7 +340,7 @@ func TestDeviceLoginExpired(t *testing.T) {
 
 func TestDeviceLoginKeyAndDeviceMutuallyExclusive(t *testing.T) {
 	t.Setenv(config.EnvConfigDir, t.TempDir())
-	_, err := runCmd(t, "login", "--key", testKey, "--device", "--api-url", "http://unused")
+	_, err := runCmd(t, "login", "--key", testKey, "--device")
 	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
 		t.Fatalf("error = %v, want a mutually-exclusive message", err)
 	}
@@ -347,13 +356,13 @@ func TestDeviceLoginCtrlCSafe(t *testing.T) {
 	// Never resolves: the cancelled context must stop polling before it would.
 	mock := &deviceMock{pollsBeforeResolve: 1 << 20}
 	srv := mock.server(t)
+	useLoginAPIURL(t, srv.URL)
 
 	root := newRootCmd()
 	root.SetOut(&bytes.Buffer{})
 	root.SetErr(&bytes.Buffer{})
 	root.SetArgs([]string{
 		"login", "--device", "--email", "dev@example.com", "--machine", "laptop-1",
-		"--api-url", srv.URL,
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled: simulates Ctrl-C landing before/at the start of the poll
