@@ -3,6 +3,7 @@ package normalize
 import (
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/agent-burn-down/desktop-client/internal/api"
@@ -54,12 +55,32 @@ func flattenLogRecord(record any, repo string) *api.NormalizedEvent {
 	if name == nil {
 		return nil
 	}
+	toolName := displayIdentity(
+		pyOr(attrs["tool_name"], attrs["tool"], attrs["codex.op"]), maxToolNameLen)
+	mcpServer := displayIdentity(pyOr(attrs["mcp.server.name"], attrs["mcp_server"]), maxMCPServerLen)
+	mcpTool := displayIdentity(pyOr(attrs["mcp.tool.name"], attrs["mcp_tool"]), maxMCPToolLen)
+	derivedServer, derivedTool := deriveMCPIdentity(toolName)
+	if mcpServer == nil {
+		mcpServer = derivedServer
+	}
+	if mcpTool == nil {
+		mcpTool = derivedTool
+	}
 	return &api.NormalizedEvent{
-		EventName:         name,
-		Timestamp:         eventTimestamp(attrs, m),
-		SessionID:         asString(firstAttr(attrs, sessionAliases...)),
-		Model:             asString(pyOr(attrs["model"], attrs["slug"])),
-		ToolName:          asString(pyOr(attrs["tool_name"], attrs["tool"], attrs["codex.op"])),
+		EventName: name,
+		Timestamp: eventTimestamp(attrs, m),
+		SessionID: asString(firstAttr(attrs, sessionAliases...)),
+		Model:     asString(pyOr(attrs["model"], attrs["slug"])),
+		ToolName:  toolName,
+		MCPServer: mcpServer,
+		MCPTool:   mcpTool,
+		MCPServerToolCount: boundedInt(
+			pyOr(attrs["mcp.server.tool_count"], attrs["mcp_server_tool_count"]),
+			0, maxMCPServerToolCount),
+		MCPSchemaTokens: boundedInt(
+			pyOr(attrs["mcp.schema.tokens"], attrs["mcp_schema_tokens"]),
+			0, maxMCPSchemaTokens),
+		SkillName:         displayIdentity(attrs["skill_name"], maxSkillNameLen),
 		ToolSuccess:       boolish(attrs["success"]),
 		ToolDurationMs:    floatOrNil(attrs["duration_ms"]),
 		CostUSD:           floatOrNil(attrs["cost_usd"]),
@@ -70,6 +91,72 @@ func flattenLogRecord(record any, repo string) *api.NormalizedEvent {
 		Repo:              asString(pyOr(repo, attrs["repo"], attrs["repository"])),
 		ErrorMessage:      truncated(asString(pyOr(attrs["error"], attrs["error.message"]))),
 	}
+}
+
+const (
+	maxMCPServerLen       = 120
+	maxMCPToolLen         = 160
+	maxToolNameLen        = 160
+	maxSkillNameLen       = 160
+	maxMCPServerToolCount = 10_000
+	maxMCPSchemaTokens    = 10_000_000
+)
+
+// displayIdentity accepts only short, single-line labels. It deliberately
+// rejects path-shaped and structured values so configuration bodies,
+// environment assignments, URLs, and raw schemas cannot be retained under an
+// attribution field. Whitespace is collapsed for stable grouping.
+func displayIdentity(v any, maxLen int) *string {
+	s, ok := v.(string)
+	if !ok {
+		return nil
+	}
+	s = strings.Join(strings.Fields(s), " ")
+	if s == "" || len(s) > maxLen || unsafeDisplayIdentity(s) {
+		return nil
+	}
+	return &s
+}
+
+func unsafeDisplayIdentity(s string) bool {
+	if !utf8.ValidString(s) {
+		return true
+	}
+	if strings.ContainsAny(s, "/\\\x00\r\n{}[]=<>") || strings.Contains(s, "://") {
+		return true
+	}
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// deriveMCPIdentity splits Codex's unambiguous mcp__server__tool convention.
+// The original generic tool_name remains untouched for compatibility.
+func deriveMCPIdentity(toolName *string) (*string, *string) {
+	if toolName == nil || !strings.HasPrefix(*toolName, "mcp__") {
+		return nil, nil
+	}
+	parts := strings.SplitN(strings.TrimPrefix(*toolName, "mcp__"), "__", 2)
+	if len(parts) != 2 {
+		return nil, nil
+	}
+	server := displayIdentity(parts[0], maxMCPServerLen)
+	tool := displayIdentity(parts[1], maxMCPToolLen)
+	if server == nil || tool == nil {
+		return nil, nil
+	}
+	return server, tool
+}
+
+func boundedInt(v any, min, max int64) *int64 {
+	n := intOrNil(v)
+	if n == nil || *n < min || *n > max {
+		return nil
+	}
+	return n
 }
 
 var sessionAliases = []string{"session.id", "session_id", "conversation.id", "thread.id"}
