@@ -33,7 +33,11 @@ func TestRoundTrip(t *testing.T) {
 			FlushIntervalSeconds: 30,
 			MaxBatchSize:         500,
 			RefreshCadence:       "near-real-time",
+			InventoryEnabled:     true,
 		},
+		InventoryStatus:       "current",
+		InventoryLastUploadAt: "2026-07-21T20:00:00Z",
+		InventoryItemCount:    7,
 	}
 	if err := s.Save(want); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -44,7 +48,10 @@ func TestRoundTrip(t *testing.T) {
 	}
 	if got.APIURL != want.APIURL || got.CollectorKey != want.CollectorKey ||
 		got.CollectorID != want.CollectorID || got.UserEmail != want.UserEmail ||
-		got.Machine != want.Machine || got.KeyExpiresAt != want.KeyExpiresAt {
+		got.Machine != want.Machine || got.KeyExpiresAt != want.KeyExpiresAt ||
+		got.InventoryStatus != want.InventoryStatus ||
+		got.InventoryLastUploadAt != want.InventoryLastUploadAt ||
+		got.InventoryItemCount != want.InventoryItemCount {
 		t.Errorf("scalar round-trip mismatch:\n got %+v\nwant %+v", *got, *want)
 	}
 	if got.Policy != want.Policy {

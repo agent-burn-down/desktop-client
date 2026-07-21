@@ -193,6 +193,7 @@ func (d *Doctor) Run(ctx context.Context) []Result {
 		checkKeyExpiry(cfg, cfgErr),
 		checkDaemon(daemonUp, d.port),
 		checkAgents(d.port),
+		checkInventory(cfg, cfgErr),
 		d.checkQueue(daemonUp, hz),
 		d.checkService(),
 	}

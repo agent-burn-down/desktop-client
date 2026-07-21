@@ -41,6 +41,22 @@ source, outcome, token totals, cost/tool/error counters, and a structured list
 of actual model token contributions. It does not scan prompts or completions,
 and it drops absolute repository paths and composite `mixed:` model labels.
 
+## Optional sanitized inventory
+
+Sanitized Skill, Plugin, MCP, and context inventory is disabled by default and
+controlled by organization-admin consent. The collector reads the live
+`inventory_enabled` policy on every heartbeat. While disabled it performs no
+inventory scan, builds no snapshot, stores no inventory values, and sends no
+inventory request. Revocation cancels discovery or upload already in progress.
+
+When enabled, discovery returns only `kind`, display-safe `name` and `source`,
+optional display-safe description/version, bounded counts, and presence. Local
+paths, file contents, configuration bodies, environment values, prompts,
+credentials, secrets, raw MCP schemas, and autonomy controls are excluded. The
+snapshot exists only in memory for the duration of one replace request; local
+config retains lifecycle status, last-upload time, and item count, never the
+discovered values.
+
 `error_message` is the only free-text field that passes through. It is capped at
 2 KB on a UTF-8 boundary so a misbehaving agent cannot stream large diagnostics
 (or accidental prompt fragments) through it.

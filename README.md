@@ -42,6 +42,14 @@ The daemon also builds revisioned session summaries from that same metadata
 allowlist and uploads them idempotently; it never reads prompt or completion
 content to do so.
 
+An organization administrator may separately opt in to sanitized local
+inventory. The collector learns that consent through heartbeat policy and only
+then discovers display-safe Skill, Plugin, MCP, and context names/counts. It
+uploads a replace-only snapshot at least every 12 hours. Disabled consent means
+no discovery, retention, or inventory request; revocation cancels an in-flight
+scan immediately. Paths, configuration and environment bodies, prompts,
+credentials, raw schemas, and autonomy controls are never inventory fields.
+
 ## Install
 
 macOS only. A Homebrew tap is not available yet — it is tracked in issue #14 and

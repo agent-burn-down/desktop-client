@@ -29,23 +29,26 @@ const (
 // knownFields lists the JSON keys represented by typed Config fields. Any other
 // key found on load is preserved in Config.extra across a save round-trip.
 var knownFields = map[string]struct{}{
-	"api_url":                {},
-	"collector_key":          {},
-	"collector_id":           {},
-	"user_email":             {},
-	"machine":                {},
-	"policy":                 {},
-	"key_expires_at":         {},
-	"retention_days":         {},
-	"key_id":                 {},
-	"pending_key":            {},
-	"pending_key_id":         {},
-	"pending_key_expires_at": {},
-	"old_key_valid_until":    {},
-	"last_rotation_at":       {},
-	"rotation_failures":      {},
-	"auth_reason":            {},
-	"receiver_port":          {},
+	"api_url":                  {},
+	"collector_key":            {},
+	"collector_id":             {},
+	"user_email":               {},
+	"machine":                  {},
+	"policy":                   {},
+	"key_expires_at":           {},
+	"retention_days":           {},
+	"key_id":                   {},
+	"pending_key":              {},
+	"pending_key_id":           {},
+	"pending_key_expires_at":   {},
+	"old_key_valid_until":      {},
+	"last_rotation_at":         {},
+	"rotation_failures":        {},
+	"auth_reason":              {},
+	"receiver_port":            {},
+	"inventory_status":         {},
+	"inventory_last_upload_at": {},
+	"inventory_item_count":     {},
 }
 
 const (
@@ -106,6 +109,11 @@ type Config struct {
 	// launchd plist), since that flag is otherwise known only to the running
 	// process's argv.
 	ReceiverPort int `json:"receiver_port,omitempty"`
+	// InventoryStatus exposes lifecycle only (disabled, pending, current, or
+	// error); inventory values are never persisted in collector config.
+	InventoryStatus       string `json:"inventory_status,omitempty"`
+	InventoryLastUploadAt string `json:"inventory_last_upload_at,omitempty"`
+	InventoryItemCount    int    `json:"inventory_item_count,omitempty"`
 
 	// extra holds JSON fields not represented by the typed fields above, so
 	// they survive a load/save round-trip.

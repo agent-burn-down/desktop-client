@@ -129,6 +129,31 @@ func checkKeyExpiry(cfg *config.Config, cfgErr error) Result {
 	}
 }
 
+func checkInventory(cfg *config.Config, cfgErr error) Result {
+	if cfgErr != nil {
+		return pass("inventory", "n/a (no collector config yet)")
+	}
+	if !cfg.Policy.InventoryEnabled {
+		return pass("inventory", "disabled by organization policy")
+	}
+	switch cfg.InventoryStatus {
+	case "current":
+		observed, err := time.Parse(time.RFC3339, cfg.InventoryLastUploadAt)
+		if err != nil || time.Since(observed) >= 24*time.Hour {
+			return warn("inventory", "enabled, but the last snapshot is stale",
+				"keep the collector running and check network connectivity")
+		}
+		return pass("inventory", fmt.Sprintf(
+			"current (%d items; values hidden)", cfg.InventoryItemCount))
+	case "pending", "":
+		return warn("inventory", "enabled, waiting for the first sanitized snapshot",
+			"keep the collector running through the next heartbeat")
+	default:
+		return warn("inventory", "enabled, but the last snapshot attempt failed",
+			"check network connectivity; the collector retries automatically")
+	}
+}
+
 // apiClient builds a client with a no-op retry sleep so probes fail fast.
 func (d *Doctor) apiClient(cfg *config.Config) *api.Client {
 	return api.NewClient(cfg.APIURL, cfg.CollectorKey,

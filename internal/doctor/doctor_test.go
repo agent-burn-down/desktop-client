@@ -78,8 +78,8 @@ func TestRunEveryNonPassHasHint(t *testing.T) {
 		HealthzURL: "http://127.0.0.1:65533/healthz",
 	})
 	results := d.Run(context.Background())
-	if len(results) != 9 {
-		t.Fatalf("expected 9 checks, got %d", len(results))
+	if len(results) != 10 {
+		t.Fatalf("expected 10 checks, got %d", len(results))
 	}
 	for _, r := range results {
 		if (r.Status == Warn || r.Status == Fail) && r.Hint == "" {
@@ -105,7 +105,7 @@ func TestRunSafeWithDaemonDown(t *testing.T) {
 		names[r.Name] = true
 	}
 	for _, want := range []string{
-		"version", "config", "backend", "heartbeat", "daemon", "agents", "queue", "service",
+		"version", "config", "backend", "heartbeat", "daemon", "agents", "inventory", "queue", "service",
 	} {
 		if !names[want] {
 			t.Errorf("missing check %q", want)

@@ -109,6 +109,8 @@ func assemble(opts Options, dir string, logger *slog.Logger, logFile io.Closer) 
 	d.uploader = uploader.New(uploader.Config{
 		Client: client, Queue: q, Store: opts.Store, Counters: reg,
 		Logger: logger, CollectorID: cfg.CollectorID, Policy: cfg.Policy,
+		InventoryStatus:       cfg.InventoryStatus,
+		InventoryLastUploadAt: cfg.InventoryLastUploadAt,
 	})
 	if err := d.startReceiver(opts.Port); err != nil {
 		_ = q.Close()
