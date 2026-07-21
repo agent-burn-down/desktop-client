@@ -20,15 +20,11 @@ contents ever leave your machine. See [Privacy](privacy.md).
 macOS only. A Homebrew tap is not available yet (tracked in issue #14, on hold
 pending Apple Developer ID signing).
 
-Prebuilt binaries ship with every release, so you can install without cloning the
-repo. Pick `arm64` for Apple silicon or `amd64` for Intel:
+The installer selects the correct Apple silicon or Intel archive, verifies its
+published checksum, and installs the CLI into the standard binary directory:
 
 ```
-ARCH=arm64   # Intel Macs: amd64
-REPO=agent-burn-down/desktop-client
-TAG=$(curl -fsSL https://api.github.com/repos/$REPO/releases/latest | grep -m1 '"tag_name"' | cut -d'"' -f4)
-curl -fsSL "https://github.com/$REPO/releases/download/$TAG/burndown-cli_${TAG#v}_darwin_${ARCH}.tar.gz" | tar -xzf - burndown-cli
-sudo mv burndown-cli /usr/local/bin/
+curl -fsSL https://github.com/agent-burn-down/desktop-client/releases/latest/download/install.sh | sh
 ```
 
 The binary is not notarized yet (issue #14); fetching it with `curl` avoids

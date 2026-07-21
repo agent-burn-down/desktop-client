@@ -4,15 +4,11 @@ A fresh machine goes from nothing to a running collector in five steps. The
 [README](https://github.com/agent-burn-down/desktop-client#quickstart) is the
 canonical version; this page adds a little more detail.
 
-macOS only. Install the prebuilt binary first — no repo checkout needed. Pick
-`arm64` for Apple silicon or `amd64` for Intel:
+macOS only. The installer selects the correct Apple silicon or Intel archive,
+verifies its published checksum, and installs the CLI:
 
 ```
-ARCH=arm64   # Intel Macs: amd64
-REPO=agent-burn-down/desktop-client
-TAG=$(curl -fsSL https://api.github.com/repos/$REPO/releases/latest | grep -m1 '"tag_name"' | cut -d'"' -f4)
-curl -fsSL "https://github.com/$REPO/releases/download/$TAG/burndown-cli_${TAG#v}_darwin_${ARCH}.tar.gz" | tar -xzf - burndown-cli
-sudo mv burndown-cli /usr/local/bin/
+curl -fsSL https://github.com/agent-burn-down/desktop-client/releases/latest/download/install.sh | sh
 ```
 
 The binary is not notarized yet (issue #14); fetching it with `curl` avoids
@@ -54,13 +50,14 @@ be piped on stdin):
 burndown-cli login --email you@example.com --key abd_... --machine your-hostname
 ```
 
-Override the backend with `--api-url` if you are pointing at a non-default
-environment. If your key ever changes, run `login` again; use `register` to
-refresh the collector id and policy without re-entering the key.
+The collector backend is fixed to the production
+`https://collector.agentburndown.com` endpoint; installation and login do not
+accept a backend URL. If your key ever changes, run `login` again; use
+`register` to refresh the collector id and policy without re-entering the key.
 
 Clients upgrading from a release that used `https://app.agentburndown.com` as
 the default automatically migrate that exact stored URL to the dedicated
-`https://collector.agentburndown.com` endpoint. Custom URLs are preserved.
+`https://collector.agentburndown.com` endpoint.
 
 ## 3. Configure your agents
 
