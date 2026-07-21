@@ -198,7 +198,7 @@ burndown-cli stats
 The collector uploads metadata only. Free text never leaves your machine.
 
 Every uploaded event is built from a fixed allowlist. The normalizer copies these
-14 fields and nothing else:
+19 fields and nothing else:
 
 | Field | Description |
 |-------|-------------|
@@ -207,6 +207,11 @@ Every uploaded event is built from a fixed allowlist. The normalizer copies thes
 | `session_id` | Agent session or conversation id |
 | `model` | Model slug |
 | `tool_name` | Tool invoked |
+| `mcp_server` | Display-safe MCP server identity |
+| `mcp_tool` | Display-safe MCP tool identity |
+| `mcp_server_tool_count` | Reported MCP server tool count |
+| `mcp_schema_tokens` | Reported MCP schema token count |
+| `skill_name` | Explicit display-safe Skill identity |
 | `tool_success` | Whether the tool call succeeded |
 | `tool_duration_ms` | Tool call duration |
 | `cost_usd` | Reported cost |

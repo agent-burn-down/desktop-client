@@ -68,6 +68,36 @@ func TestEnqueueLeaseAckRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAttributionSurvivesQueueRoundTrip(t *testing.T) {
+	q := openTemp(t, Options{})
+	server := "github"
+	tool := "get_issue"
+	skill := "issue tracker"
+	toolCount := int64(42)
+	schemaTokens := int64(12000)
+	event := sampleEvents(1)[0]
+	event.MCPServer = &server
+	event.MCPTool = &tool
+	event.MCPServerToolCount = &toolCount
+	event.MCPSchemaTokens = &schemaTokens
+	event.SkillName = &skill
+	if err := q.Enqueue([]api.NormalizedEvent{event}); err != nil {
+		t.Fatal(err)
+	}
+	items, err := q.LeaseBatch(1, time.Minute)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("lease = %d items, %v", len(items), err)
+	}
+	got := items[0].Event
+	if got.MCPServer == nil || *got.MCPServer != server ||
+		got.MCPTool == nil || *got.MCPTool != tool ||
+		got.MCPServerToolCount == nil || *got.MCPServerToolCount != toolCount ||
+		got.MCPSchemaTokens == nil || *got.MCPSchemaTokens != schemaTokens ||
+		got.SkillName == nil || *got.SkillName != skill {
+		t.Fatalf("attribution changed after queue round trip: %+v", got)
+	}
+}
+
 func TestNackRequeuesAndCountsAttempts(t *testing.T) {
 	q := openTemp(t, Options{})
 	_ = q.Enqueue(sampleEvents(1))

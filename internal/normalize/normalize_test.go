@@ -277,7 +277,7 @@ func TestCodexErrorMessageAliasAndPrivacy(t *testing.T) {
 	}
 }
 
-func TestNormalizedEventHasAll15Keys(t *testing.T) {
+func TestNormalizedEventHasAll20Keys(t *testing.T) {
 	events, _ := NormalizeLogBatch(realisticPayload, "test-repo")
 	raw, err := json.Marshal(events[0])
 	if err != nil {
@@ -289,6 +289,7 @@ func TestNormalizedEventHasAll15Keys(t *testing.T) {
 	}
 	want := []string{
 		"event_id", "event_name", "timestamp", "session_id", "model", "tool_name",
+		"mcp_server", "mcp_tool", "mcp_server_tool_count", "mcp_schema_tokens", "skill_name",
 		"tool_success", "tool_duration_ms", "cost_usd", "input_tokens",
 		"output_tokens", "cache_read_tokens", "cache_create_tokens",
 		"repo", "error_message",
@@ -301,6 +302,93 @@ func TestNormalizedEventHasAll15Keys(t *testing.T) {
 			t.Fatalf("missing key %q", k)
 		}
 	}
+}
+
+func TestExplicitMCPAndSkillAttribution(t *testing.T) {
+	payload := oneRecordPayload(
+		attr("event.name", "stringValue", "codex.tool_result"),
+		attr("tool_name", "stringValue", "generic-tool"),
+		attr("mcp.server.name", "stringValue", " github "),
+		attr("mcp.tool.name", "stringValue", "get_issue"),
+		attr("mcp.server.tool_count", "intValue", "42"),
+		attr("mcp.schema.tokens", "intValue", "12000"),
+		attr("skill_name", "stringValue", " issue   tracker "),
+	)
+	events, _ := NormalizeLogBatch(payload, "")
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1", len(events))
+	}
+	ev := events[0]
+	assertStr(t, "tool_name", ev.ToolName, "generic-tool")
+	assertStr(t, "mcp_server", ev.MCPServer, "github")
+	assertStr(t, "mcp_tool", ev.MCPTool, "get_issue")
+	assertInt(t, "mcp_server_tool_count", ev.MCPServerToolCount, 42)
+	assertInt(t, "mcp_schema_tokens", ev.MCPSchemaTokens, 12000)
+	assertStr(t, "skill_name", ev.SkillName, "issue tracker")
+}
+
+func TestDerivedCodexMCPIdentityPreservesToolName(t *testing.T) {
+	payload := oneRecordPayload(
+		attr("event.name", "stringValue", "codex.tool_result"),
+		attr("tool_name", "stringValue", "mcp__github__get_issue"),
+	)
+	events, _ := NormalizeLogBatch(payload, "")
+	ev := events[0]
+	assertStr(t, "tool_name", ev.ToolName, "mcp__github__get_issue")
+	assertStr(t, "mcp_server", ev.MCPServer, "github")
+	assertStr(t, "mcp_tool", ev.MCPTool, "get_issue")
+}
+
+func TestGenericSkillCallStaysUnattributed(t *testing.T) {
+	payload := oneRecordPayload(
+		attr("event.name", "stringValue", "codex.tool_result"),
+		attr("tool_name", "stringValue", "Skill"),
+	)
+	events, _ := NormalizeLogBatch(payload, "")
+	if events[0].SkillName != nil {
+		t.Fatalf("skill_name = %q, want nil", *events[0].SkillName)
+	}
+}
+
+func TestAttributionRejectsUnsafeOrOutOfRangeValues(t *testing.T) {
+	payload := oneRecordPayload(
+		attr("event.name", "stringValue", "codex.tool_result"),
+		attr("tool_name", "stringValue", "/bin/secret-tool"),
+		attr("mcp_server", "stringValue", "/Users/alice/.config/mcp.json"),
+		attr("mcp_tool", "stringValue", `API_KEY=secret`),
+		attr("mcp_server_tool_count", "intValue", "10001"),
+		attr("mcp_schema_tokens", "intValue", "10000001"),
+		attr("skill_name", "stringValue", `skills/private/SKILL.md`),
+		attr("prompt", "stringValue", "SECRET-PROMPT"),
+		attr("mcp.schema.body", "stringValue", `{"secret":"value"}`),
+	)
+	events, _ := NormalizeLogBatch(payload, "")
+	ev := events[0]
+	if ev.ToolName != nil || ev.MCPServer != nil || ev.MCPTool != nil || ev.MCPServerToolCount != nil ||
+		ev.MCPSchemaTokens != nil || ev.SkillName != nil {
+		t.Fatalf("unsafe attribution survived: %+v", ev)
+	}
+	raw, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"SECRET-PROMPT", "mcp.schema.body", "secret"} {
+		if strings.Contains(string(raw), secret) {
+			t.Fatalf("output leaked %q: %s", secret, raw)
+		}
+	}
+}
+
+func oneRecordPayload(attrs ...map[string]any) map[string]any {
+	values := make([]any, len(attrs))
+	for i := range attrs {
+		values[i] = attrs[i]
+	}
+	return map[string]any{"resourceLogs": []any{map[string]any{
+		"scopeLogs": []any{map[string]any{
+			"logRecords": []any{map[string]any{"attributes": values}},
+		}},
+	}}}
 }
 
 // TestTokenAliasZeroFalls verifies the Python-`or` fallthrough on falsy 0.

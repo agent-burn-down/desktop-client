@@ -9,6 +9,7 @@ import (
 // emitted event.
 var allEventKeys = []string{
 	"event_id", "event_name", "timestamp", "session_id", "model", "tool_name",
+	"mcp_server", "mcp_tool", "mcp_server_tool_count", "mcp_schema_tokens", "skill_name",
 	"tool_success", "tool_duration_ms", "cost_usd", "input_tokens",
 	"output_tokens", "cache_read_tokens", "cache_create_tokens", "repo",
 	"error_message",
@@ -43,11 +44,21 @@ func TestNormalizedEventEmitsSetValues(t *testing.T) {
 	success := true
 	dur := 450.5
 	in := int64(1200)
+	mcpServer := "github"
+	mcpTool := "get_issue"
+	mcpToolCount := int64(12)
+	mcpSchemaTokens := int64(3400)
+	skillName := "issue tracker"
 	ev := NormalizedEvent{
-		EventName:      &name,
-		ToolSuccess:    &success,
-		ToolDurationMs: &dur,
-		InputTokens:    &in,
+		EventName:          &name,
+		MCPServer:          &mcpServer,
+		MCPTool:            &mcpTool,
+		MCPServerToolCount: &mcpToolCount,
+		MCPSchemaTokens:    &mcpSchemaTokens,
+		SkillName:          &skillName,
+		ToolSuccess:        &success,
+		ToolDurationMs:     &dur,
+		InputTokens:        &in,
 	}
 	data, err := json.Marshal(ev)
 	if err != nil {
@@ -61,12 +72,17 @@ func TestNormalizedEventEmitsSetValues(t *testing.T) {
 		t.Errorf("got %d keys, want %d", len(m), len(allEventKeys))
 	}
 	checks := map[string]string{
-		"event_name":       `"tool_use"`,
-		"tool_success":     "true",
-		"tool_duration_ms": "450.5",
-		"input_tokens":     "1200",
-		"model":            "null",
-		"repo":             "null",
+		"event_name":            `"tool_use"`,
+		"tool_success":          "true",
+		"tool_duration_ms":      "450.5",
+		"input_tokens":          "1200",
+		"mcp_server":            `"github"`,
+		"mcp_tool":              `"get_issue"`,
+		"mcp_server_tool_count": "12",
+		"mcp_schema_tokens":     "3400",
+		"skill_name":            `"issue tracker"`,
+		"model":                 "null",
+		"repo":                  "null",
 	}
 	for k, want := range checks {
 		if got := string(m[k]); got != want {

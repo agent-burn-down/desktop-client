@@ -5,7 +5,7 @@ The collector uploads metadata only. Free text never leaves your machine.
 ## The allowlist
 
 Every uploaded event is built from a fixed allowlist. The normalizer copies these
-14 fields out of each incoming OTLP record and drops everything else:
+19 fields out of each incoming OTLP record and drops everything else:
 
 | Field | Description |
 |-------|-------------|
@@ -14,6 +14,11 @@ Every uploaded event is built from a fixed allowlist. The normalizer copies thes
 | `session_id` | Agent session or conversation id |
 | `model` | Model slug |
 | `tool_name` | Tool invoked |
+| `mcp_server` | Display-safe MCP server identity |
+| `mcp_tool` | Display-safe MCP tool identity |
+| `mcp_server_tool_count` | Reported MCP server tool count |
+| `mcp_schema_tokens` | Reported MCP schema token count |
+| `skill_name` | Explicit display-safe Skill identity |
 | `tool_success` | Whether the tool call succeeded |
 | `tool_duration_ms` | Tool call duration |
 | `cost_usd` | Reported cost |
@@ -42,6 +47,12 @@ and it drops absolute repository paths and composite `mixed:` model labels.
 
 On the Codex side, `setup` also writes `log_user_prompt = false`, so Codex does
 not emit prompt text to the collector in the first place.
+
+MCP and Skill labels are accepted only from explicit allowlisted attributes, or
+derived from Codex's unambiguous `mcp__server__tool` identifier. They are
+length-bounded, whitespace-normalized display identities; paths, configuration
+or environment assignments, URLs, structured bodies, and control characters
+are omitted. A generic `Skill` tool call does not imply a Skill identity.
 
 Each events batch is transmitted with the collector's own build version (the
 same version string reported at registration). This lets the backend attribute
