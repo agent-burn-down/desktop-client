@@ -52,6 +52,14 @@ type statusReport struct {
 	AuthReason       string              `json:"auth_reason,omitempty"`
 	Counters         map[string]int64    `json:"counters,omitempty"`
 	Telemetry        *counters.Telemetry `json:"telemetry,omitempty"`
+	Inventory        *inventoryStatus    `json:"inventory,omitempty"`
+}
+
+type inventoryStatus struct {
+	Enabled      bool   `json:"enabled"`
+	Status       string `json:"status"`
+	LastUploadAt string `json:"last_upload_at,omitempty"`
+	ItemCount    int    `json:"item_count"`
 }
 
 func runStatus(cmd *cobra.Command, port int, asJSON bool) error {
@@ -66,6 +74,10 @@ func runStatus(cmd *cobra.Command, port int, asJSON bool) error {
 		report.RotationFailures = cfg.RotationFailures
 		report.LastRotationAt = cfg.LastRotationAt
 		report.AuthReason = cfg.AuthReason
+		report.Inventory = &inventoryStatus{
+			Enabled: cfg.Policy.InventoryEnabled, Status: cfg.InventoryStatus,
+			LastUploadAt: cfg.InventoryLastUploadAt, ItemCount: cfg.InventoryItemCount,
+		}
 	}
 	if hz, err := probeHealthz(cmd.Context(), port); err == nil {
 		report.DaemonUp = true
@@ -115,6 +127,14 @@ func writeTextReport(w io.Writer, report statusReport) {
 	}
 	if report.AuthReason != "" {
 		outf(w, "auth:         DEGRADED (%s) — run `burndown-cli login`\n", report.AuthReason)
+	}
+	if report.Inventory != nil {
+		outf(w, "inventory:    %s", orDash(report.Inventory.Status))
+		if report.Inventory.Enabled {
+			outf(w, " (%d items; last upload %s)", report.Inventory.ItemCount,
+				orDash(report.Inventory.LastUploadAt))
+		}
+		outln(w, "")
 	}
 	if report.DaemonUp {
 		writeCounters(w, report.Counters)

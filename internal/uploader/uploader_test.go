@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,6 +56,9 @@ type mockBackend struct {
 	recordedSessions map[string]int
 	sessionPosts     int
 	sessionsDown     bool
+	inventoryPosts   int
+	inventoryDown    bool
+	lastInventory    []api.InventoryItem
 
 	// dedupeSeen tracks event_ids already accepted, mirroring the backend's
 	// per-org dedupe window (yaah-hosted#24): a replayed event_id is counted as
@@ -113,6 +117,7 @@ func (m *mockBackend) server(t *testing.T) *httptest.Server {
 	mux.HandleFunc("/ingest/v1/events", m.handleEvents)
 	mux.HandleFunc("/ingest/v1/metrics", m.handleMetrics)
 	mux.HandleFunc("/ingest/v1/sessions", m.handleSessions)
+	mux.HandleFunc("/ingest/v1/inventory", m.handleInventory)
 	mux.HandleFunc("/ingest/v1/keys/rotate", m.handleRotate)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -226,6 +231,24 @@ func (m *mockBackend) handleSessions(w http.ResponseWriter, r *http.Request) {
 		m.recordedSessions[summary.SessionID]++
 	}
 	_ = json.NewEncoder(w).Encode(api.Counts{Accepted: len(req.Sessions)})
+}
+
+func (m *mockBackend) handleInventory(w http.ResponseWriter, r *http.Request) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.inventoryPosts++
+	if m.inventoryDown {
+		writeErr(w, http.StatusInternalServerError, "boom")
+		return
+	}
+	var req struct {
+		Items []api.InventoryItem `json:"items"`
+	}
+	_ = json.NewDecoder(requestBody(r)).Decode(&req)
+	m.lastInventory = req.Items
+	_ = json.NewEncoder(w).Encode(api.InventoryOut{
+		Accepted: len(req.Items), Replaced: true, ObservedAt: time.Now().UTC().Format(time.RFC3339),
+	})
 }
 
 func (m *mockBackend) handleRotate(w http.ResponseWriter, r *http.Request) {
@@ -557,6 +580,158 @@ func TestPolicyChangeAppliedWithinOneCycle(t *testing.T) {
 	}
 	if store.saved == nil || store.saved.Policy.FlushIntervalSeconds != 1 {
 		t.Fatal("refreshed policy was not persisted to the config store")
+	}
+}
+
+func TestInventoryPolicyEnableUploadsAndRevocationStopsScanning(t *testing.T) {
+	mock := newMockBackend()
+	srv := mock.server(t)
+	store := newMemStore()
+	up, _, _ := testDeps(t, mock, srv.URL)
+	up.store = store
+	var discoveries atomic.Int64
+	up.discoverInventory = func(context.Context) ([]api.InventoryItem, error) {
+		discoveries.Add(1)
+		return []api.InventoryItem{{Kind: "skill", Name: "deploy-check", Source: "codex"}}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); up.runInventory(ctx) }()
+
+	mock.mu.Lock()
+	mock.policy.InventoryEnabled = true
+	mock.mu.Unlock()
+	up.HeartbeatOnce(context.Background())
+	waitFor(t, func() bool {
+		mock.mu.Lock()
+		defer mock.mu.Unlock()
+		return mock.inventoryPosts == 1
+	})
+	if got := discoveries.Load(); got != 1 {
+		t.Fatalf("discoveries = %d, want 1", got)
+	}
+	store.mu.Lock()
+	if store.saved.InventoryStatus != "current" || store.saved.InventoryItemCount != 1 {
+		t.Fatalf("persisted inventory status = %+v", store.saved)
+	}
+	store.mu.Unlock()
+
+	mock.mu.Lock()
+	mock.policy.InventoryEnabled = false
+	mock.mu.Unlock()
+	up.HeartbeatOnce(context.Background())
+	time.Sleep(20 * time.Millisecond)
+	if got := discoveries.Load(); got != 1 {
+		t.Fatalf("disabled policy performed discovery: %d calls", got)
+	}
+	store.mu.Lock()
+	if store.saved.InventoryStatus != "disabled" || store.saved.InventoryItemCount != 0 {
+		t.Fatalf("revoked inventory status = %+v", store.saved)
+	}
+	store.mu.Unlock()
+	cancel()
+	<-done
+}
+
+func TestInventoryRevocationCancelsInFlightDiscovery(t *testing.T) {
+	mock := newMockBackend()
+	srv := mock.server(t)
+	up, _, _ := testDeps(t, mock, srv.URL)
+	up.store = newMemStore()
+	started := make(chan struct{})
+	up.discoverInventory = func(ctx context.Context) ([]api.InventoryItem, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); up.runInventory(ctx) }()
+	mock.mu.Lock()
+	mock.policy.InventoryEnabled = true
+	mock.mu.Unlock()
+	up.HeartbeatOnce(context.Background())
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("inventory discovery did not start")
+	}
+	mock.mu.Lock()
+	mock.policy.InventoryEnabled = false
+	mock.mu.Unlock()
+	up.HeartbeatOnce(context.Background())
+	waitFor(t, func() bool { return !up.inventoryEnabled() })
+	mock.mu.Lock()
+	posts := mock.inventoryPosts
+	mock.mu.Unlock()
+	if posts != 0 {
+		t.Fatalf("inventory posts after revocation = %d, want 0", posts)
+	}
+	cancel()
+	<-done
+}
+
+func TestInventoryFailureRetriesWithoutBlockingEventUploads(t *testing.T) {
+	mock := newMockBackend()
+	mock.policy.InventoryEnabled = true
+	mock.inventoryDown = true
+	srv := mock.server(t)
+	up, q, _ := testDeps(t, mock, srv.URL)
+	up.store = newMemStore()
+	up.discoverInventory = func(context.Context) ([]api.InventoryItem, error) {
+		return []api.InventoryItem{{Kind: "mcp", Name: "github", Source: "codex"}}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); up.runInventory(ctx) }()
+
+	up.HeartbeatOnce(context.Background())
+	if err := q.Enqueue(markedEvents(2)); err != nil {
+		t.Fatal(err)
+	}
+	up.FlushOnce(context.Background())
+	if depth, _ := q.Depth(); depth != 0 {
+		t.Fatalf("event upload blocked by inventory failure; depth=%d", depth)
+	}
+	waitFor(t, func() bool {
+		up.store.(*memStore).mu.Lock()
+		defer up.store.(*memStore).mu.Unlock()
+		return up.store.(*memStore).saved.InventoryStatus == "error"
+	})
+	mock.mu.Lock()
+	failedPosts := mock.inventoryPosts
+	mock.inventoryDown = false
+	mock.mu.Unlock()
+	if failedPosts < 1 || failedPosts > 4 {
+		t.Fatalf("bounded inventory attempts = %d, want 1..4", failedPosts)
+	}
+	up.mu.Lock()
+	up.inventoryNextAttempt = time.Time{}
+	up.mu.Unlock()
+	up.HeartbeatOnce(context.Background())
+	waitFor(t, func() bool {
+		mock.mu.Lock()
+		defer mock.mu.Unlock()
+		return mock.inventoryPosts > failedPosts
+	})
+	up.store.(*memStore).mu.Lock()
+	status := up.store.(*memStore).saved.InventoryStatus
+	up.store.(*memStore).mu.Unlock()
+	if status != "current" {
+		t.Fatalf("retry status = %q, want current", status)
+	}
+	cancel()
+	<-done
+}
+
+func waitFor(t *testing.T, ready func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !ready() {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for condition")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

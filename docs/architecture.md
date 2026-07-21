@@ -53,6 +53,12 @@ refreshes on each heartbeat. It also uploads session snapshots to
 `POST /ingest/v1/sessions`; revision-aware acknowledgements keep a newer local
 snapshot pending if an older revision was in flight.
 
+When heartbeat policy explicitly enables sanitized inventory, a separate
+worker discovers allowlisted display metadata and posts a replace-only snapshot
+to `POST /ingest/v1/inventory`. This worker has independent retry/backoff so an
+inventory outage cannot delay event, metric, or session delivery. A disabled
+policy cancels it before further discovery or upload.
+
 ## Backend endpoints
 
 | Endpoint | Purpose |
@@ -61,6 +67,7 @@ snapshot pending if an older revision was in flight.
 | `POST /ingest/v1/heartbeat` | Liveness ping; refreshes policy |
 | `POST /ingest/v1/events` | Upload a batch of normalized events |
 | `POST /ingest/v1/sessions` | Upload idempotent structured session summaries |
+| `POST /ingest/v1/inventory` | Replace an opted-in sanitized local inventory snapshot |
 | `GET /api/health` | Unauthenticated reachability check |
 
 ## Background service

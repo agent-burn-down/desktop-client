@@ -19,6 +19,7 @@ type Policy struct {
 	FlushIntervalSeconds int    `json:"flush_interval_seconds"`
 	MaxBatchSize         int    `json:"max_batch_size"`
 	RefreshCadence       string `json:"refresh_cadence"`
+	InventoryEnabled     bool   `json:"inventory_enabled"`
 }
 
 // FlushInterval returns the flush interval, defaulting to 30s when the policy

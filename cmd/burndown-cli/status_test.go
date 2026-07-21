@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/agent-burn-down/desktop-client/internal/api"
 	"github.com/agent-burn-down/desktop-client/internal/config"
 	"github.com/agent-burn-down/desktop-client/internal/counters"
 	"github.com/agent-burn-down/desktop-client/internal/version"
@@ -81,6 +82,9 @@ func TestStatusDaemonUpJSON(t *testing.T) {
 	if report.CollectorID != 123 {
 		t.Errorf("collector_id = %d", report.CollectorID)
 	}
+	if report.Inventory == nil || report.Inventory.Enabled {
+		t.Fatalf("inventory status missing or unexpectedly enabled: %+v", report.Inventory)
+	}
 	if report.Counters["received"] != 10 {
 		t.Errorf("counters not surfaced: %+v", report.Counters)
 	}
@@ -95,6 +99,35 @@ func TestStatusDaemonUpJSON(t *testing.T) {
 	}
 	if report.Telemetry.Received != 10 || report.Telemetry.QueueDepth != 3 {
 		t.Errorf("telemetry values wrong: %+v", *report.Telemetry)
+	}
+}
+
+func TestStatusSurfacesInventoryLifecycleWithoutValues(t *testing.T) {
+	t.Setenv(config.EnvConfigDir, t.TempDir())
+	store, _ := config.NewFileStore()
+	_ = store.Save(&config.Config{
+		APIURL: "https://x", CollectorKey: testKey,
+		Policy: api.Policy{InventoryEnabled: true}, InventoryStatus: "current",
+		InventoryLastUploadAt: "2026-07-21T20:00:00Z", InventoryItemCount: 7,
+	})
+	srv, _ := fakeReceiver()
+	defer srv.Close()
+	out, err := runCmd(t, "status", "--json", "--port", strconv.Itoa(serverPort(t, srv)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report statusReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Inventory == nil || !report.Inventory.Enabled ||
+		report.Inventory.Status != "current" || report.Inventory.ItemCount != 7 {
+		t.Fatalf("inventory = %+v", report.Inventory)
+	}
+	for _, forbidden := range []string{"deploy-check", "github", "skill_name"} {
+		if strings.Contains(out, forbidden) {
+			t.Fatalf("status leaked inventory value %q: %s", forbidden, out)
+		}
 	}
 }
 

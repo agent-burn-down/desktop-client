@@ -42,6 +42,16 @@ func TestPolicyDefaults(t *testing.T) {
 	}
 }
 
+func TestPolicyInventoryConsentDecodes(t *testing.T) {
+	var policy Policy
+	if err := json.Unmarshal([]byte(`{"inventory_enabled":true}`), &policy); err != nil {
+		t.Fatal(err)
+	}
+	if !policy.InventoryEnabled {
+		t.Fatal("inventory_enabled was ignored")
+	}
+}
+
 func TestPolicyIgnoresUnknownKeys(t *testing.T) {
 	raw := `{"flush_interval_seconds":45,"max_batch_size":200,` +
 		`"refresh_cadence":"near-real-time","unknown_key":123}`

@@ -204,6 +204,34 @@ func TestCheckKeyExpiry(t *testing.T) {
 	}
 }
 
+func TestCheckInventoryLifecycle(t *testing.T) {
+	now := time.Now().UTC()
+	tests := []struct {
+		name string
+		cfg  *config.Config
+		want Status
+	}{
+		{"disabled", &config.Config{}, Pass},
+		{"enabled missing", &config.Config{Policy: api.Policy{InventoryEnabled: true}}, Warn},
+		{"enabled error", &config.Config{Policy: api.Policy{InventoryEnabled: true}, InventoryStatus: "error"}, Warn},
+		{"current", &config.Config{Policy: api.Policy{InventoryEnabled: true}, InventoryStatus: "current",
+			InventoryLastUploadAt: now.Format(time.RFC3339), InventoryItemCount: 3}, Pass},
+		{"stale", &config.Config{Policy: api.Policy{InventoryEnabled: true}, InventoryStatus: "current",
+			InventoryLastUploadAt: now.Add(-25 * time.Hour).Format(time.RFC3339)}, Warn},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := checkInventory(tt.cfg, nil)
+			if got.Status != tt.want {
+				t.Fatalf("got %+v, want %s", got, tt.want)
+			}
+			if (got.Status == Warn || got.Status == Fail) && got.Hint == "" {
+				t.Fatal("non-pass inventory check missing hint")
+			}
+		})
+	}
+}
+
 func TestCheckDaemon(t *testing.T) {
 	if r := checkDaemon(true, 8765); r.Status != Pass {
 		t.Errorf("daemon up: %+v", r)

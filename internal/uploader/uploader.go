@@ -10,6 +10,7 @@ import (
 	"github.com/agent-burn-down/desktop-client/internal/api"
 	"github.com/agent-burn-down/desktop-client/internal/config"
 	"github.com/agent-burn-down/desktop-client/internal/counters"
+	"github.com/agent-burn-down/desktop-client/internal/inventory"
 	"github.com/agent-burn-down/desktop-client/internal/queue"
 	"github.com/agent-burn-down/desktop-client/internal/version"
 )
@@ -30,6 +31,10 @@ const (
 	// enough that probing a revoked/invalid key is not itself a retry storm,
 	// fast enough to notice a re-login within a few minutes.
 	degradedProbeInterval = 5 * time.Minute
+	// Inventory snapshots refresh well inside the hosted 24-hour stale window;
+	// failures retry independently without delaying event/session uploads.
+	inventoryRefreshInterval = 12 * time.Hour
+	inventoryRetryInterval   = 5 * time.Minute
 )
 
 // uploadState is Active (normal operation) or Degraded (a 401 the daemon
@@ -44,13 +49,16 @@ const (
 
 // Config constructs an Uploader.
 type Config struct {
-	Client      *api.Client
-	Queue       *queue.Queue
-	Store       config.Store
-	Counters    *counters.Registry
-	Logger      *slog.Logger
-	CollectorID int64
-	Policy      api.Policy
+	Client                *api.Client
+	Queue                 *queue.Queue
+	Store                 config.Store
+	Counters              *counters.Registry
+	Logger                *slog.Logger
+	CollectorID           int64
+	Policy                api.Policy
+	InventoryStatus       string
+	InventoryLastUploadAt string
+	DiscoverInventory     func(context.Context) ([]api.InventoryItem, error)
 }
 
 // Uploader drains the durable queue to the backend on the policy flush cadence
@@ -67,24 +75,47 @@ type Uploader struct {
 	now func() time.Time
 
 	mu         sync.Mutex
+	storeMu    sync.Mutex
 	policy     api.Policy
 	mode       uploadState
 	authReason string
 	backoff    time.Duration
+
+	inventoryTrigger     chan struct{}
+	inventoryRunning     bool
+	inventoryCancel      context.CancelFunc
+	inventoryNextAttempt time.Time
+	discoverInventory    func(context.Context) ([]api.InventoryItem, error)
 }
 
 // New returns an Uploader. Flushing is enabled until a 401 pauses it.
 func New(cfg Config) *Uploader {
+	discover := cfg.DiscoverInventory
+	if discover == nil {
+		roots := inventory.DefaultRoots()
+		discover = func(ctx context.Context) ([]api.InventoryItem, error) {
+			return inventory.Discover(ctx, roots)
+		}
+	}
+	nextAttempt := time.Time{}
+	if cfg.InventoryStatus == "current" {
+		if last, err := time.Parse(time.RFC3339, cfg.InventoryLastUploadAt); err == nil {
+			nextAttempt = last.Add(inventoryRefreshInterval)
+		}
+	}
 	return &Uploader{
-		client:      cfg.Client,
-		queue:       cfg.Queue,
-		store:       cfg.Store,
-		counters:    cfg.Counters,
-		logger:      cfg.Logger,
-		collectorID: cfg.CollectorID,
-		now:         time.Now,
-		policy:      cfg.Policy,
-		mode:        stateActive,
+		client:               cfg.Client,
+		queue:                cfg.Queue,
+		store:                cfg.Store,
+		counters:             cfg.Counters,
+		logger:               cfg.Logger,
+		collectorID:          cfg.CollectorID,
+		now:                  time.Now,
+		policy:               cfg.Policy,
+		mode:                 stateActive,
+		inventoryTrigger:     make(chan struct{}, 1),
+		inventoryNextAttempt: nextAttempt,
+		discoverInventory:    discover,
 	}
 }
 
@@ -94,6 +125,12 @@ func New(cfg Config) *Uploader {
 // The next cycle's delay is recomputed every time, so a policy change or a
 // state transition takes effect within one cycle without a restart.
 func (u *Uploader) Run(ctx context.Context) {
+	inventoryDone := make(chan struct{})
+	go func() {
+		defer close(inventoryDone)
+		u.runInventory(ctx)
+	}()
+	defer func() { <-inventoryDone }()
 	u.HeartbeatOnce(ctx)
 	if u.state() == stateActive {
 		u.RotateCheckOnce(ctx)
@@ -344,14 +381,25 @@ func (u *Uploader) onHeartbeatOK(policy api.Policy, keyExpiresAt *string) {
 	u.enterActive()
 	u.mu.Lock()
 	u.policy = policy
+	triggerInventory := u.scheduleInventoryLocked(policy.InventoryEnabled)
 	u.mu.Unlock()
 	u.counters.Set(counters.LastHeartbeatAt, u.now().Unix())
 	u.mutateConfig(func(cfg *config.Config) {
 		cfg.Policy = policy
+		if !policy.InventoryEnabled {
+			cfg.InventoryStatus = "disabled"
+			cfg.InventoryItemCount = 0
+		}
 		if keyExpiresAt != nil {
 			cfg.KeyExpiresAt = *keyExpiresAt
 		}
 	})
+	if triggerInventory {
+		select {
+		case u.inventoryTrigger <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // handleAuthError dispatches a 401 by its standardized code (#21's contract):
@@ -439,6 +487,13 @@ func (u *Uploader) loadConfig() (*config.Config, error) {
 // keeps running on in-memory state either way. Shared by policy persistence,
 // key-rotation state, and auth-reason persistence.
 func (u *Uploader) mutateConfig(fn func(*config.Config)) {
+	u.storeMu.Lock()
+	defer u.storeMu.Unlock()
+	u.mutateConfigLocked(fn)
+}
+
+// mutateConfigLocked is mutateConfig with storeMu already held.
+func (u *Uploader) mutateConfigLocked(fn func(*config.Config)) {
 	if u.store == nil {
 		return
 	}
