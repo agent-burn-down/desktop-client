@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"strings"
@@ -187,12 +188,24 @@ func (s *Server) reject(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method != http.MethodPost {
 		return false
 	}
-	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+	if !isJSONContentType(r.Header.Get("Content-Type")) {
 		writeJSON(w, http.StatusUnsupportedMediaType,
 			map[string]any{"error": "unsupported content type"})
 		return true
 	}
 	return false
+}
+
+// isJSONContentType reports whether ct declares exactly application/json,
+// with or without parameters ("application/json; charset=utf-8").
+//
+// A prefix match would also accept "application/json-anything", which is not
+// JSON. That is not reachable from the browser vector — any type outside the
+// three CORS-simple values forces a preflight the receiver already refuses —
+// but the media type is cheap to parse properly, so parse it properly.
+func isJSONContentType(ct string) bool {
+	mediaType, _, err := mime.ParseMediaType(ct)
+	return err == nil && mediaType == "application/json"
 }
 
 // handleLogs decodes the body and hands it to the pipeline handler, always
