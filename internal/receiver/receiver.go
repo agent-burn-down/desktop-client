@@ -1,6 +1,7 @@
 // Package receiver implements the local OTLP/HTTP JSON server that local agents
-// (Claude Code, Codex) post telemetry to. It binds loopback only and always
-// answers 200 so an agent never observes collector failure and never retries.
+// (Claude Code, Codex) post telemetry to. It binds loopback only, rejects
+// cross-origin and off-host callers, and otherwise always answers 200 so an
+// agent never observes collector failure and never retries.
 package receiver
 
 import (
@@ -8,8 +9,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -41,6 +44,8 @@ type Config struct {
 	MetricsHandler LogHandler
 	// Counters, if set, contributes extra counters to /healthz.
 	Counters CountersFunc
+	// Logger receives recovered handler panics. Defaults to slog.Default().
+	Logger *slog.Logger
 }
 
 // Server is the local OTLP/HTTP receiver.
@@ -49,6 +54,7 @@ type Server struct {
 	handler        LogHandler
 	metricsHandler LogHandler
 	counters       CountersFunc
+	logger         *slog.Logger
 	http           *http.Server
 	ln             net.Listener
 
@@ -69,11 +75,16 @@ func New(cfg Config) (*Server, error) {
 	if port == 0 {
 		port = DefaultPort
 	}
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 	s := &Server{
 		addr:           net.JoinHostPort(host, fmt.Sprintf("%d", port)),
 		handler:        cfg.Handler,
 		metricsHandler: cfg.MetricsHandler,
 		counters:       cfg.Counters,
+		logger:         logger,
 	}
 	s.http = &http.Server{Handler: s, ReadHeaderTimeout: readHeaderLimit}
 	return s, nil
@@ -89,6 +100,26 @@ func requireLoopback(host string) error {
 		return fmt.Errorf("refusing to bind non-loopback host %q; receiver is loopback-only", host)
 	}
 	return nil
+}
+
+// isLoopbackHost reports whether an HTTP request's Host header refers to a
+// loopback address, closing DNS-rebinding attacks that resolve an
+// attacker-controlled name to 127.0.0.1 but send a non-loopback Host header.
+// host may or may not carry a port, and an IPv6 literal may use bracket
+// notation ("[::1]:8765" or bare "[::1]").
+func isLoopbackHost(host string) bool {
+	h := host
+	if hostOnly, _, err := net.SplitHostPort(host); err == nil {
+		h = hostOnly
+	}
+	h = strings.TrimPrefix(strings.TrimSuffix(h, "]"), "[")
+	// Hostnames are case-insensitive, and a false 403 here silently stops an
+	// agent's telemetry, so match "localhost" in any case.
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
 }
 
 // Start binds the listener and serves in the background. A bind failure
@@ -117,8 +148,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.http.Shutdown(ctx)
 }
 
-// ServeHTTP routes the three supported endpoints; all other paths yield 404.
+// ServeHTTP guards every request against cross-origin and off-host callers
+// before routing the three supported endpoints; all other paths yield 404.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.reject(w, r) {
+		return
+	}
 	switch {
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/logs":
 		s.handleLogs(w, r)
@@ -131,45 +166,78 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// reject answers and reports true when r fails a cross-origin, host, or
+// content-type guard; ServeHTTP must stop routing when it does.
+//
+// Only POST bodies (the /v1/logs and /v1/metrics writes) are required to
+// declare Content-Type: application/json — this is what forces a CORS
+// preflight for a browser-driven write, the actual attack surface. GET
+// /healthz carries no body, so requiring a Content-Type on it would only
+// break status/doctor's health probe for no security benefit.
+func (s *Server) reject(w http.ResponseWriter, r *http.Request) bool {
+	if r.Header.Get("Origin") != "" {
+		writeJSON(w, http.StatusForbidden,
+			map[string]any{"error": "cross-origin requests are not accepted"})
+		return true
+	}
+	if !isLoopbackHost(r.Host) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "unexpected host"})
+		return true
+	}
+	if r.Method != http.MethodPost {
+		return false
+	}
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		writeJSON(w, http.StatusUnsupportedMediaType,
+			map[string]any{"error": "unsupported content type"})
+		return true
+	}
+	return false
+}
+
 // handleLogs decodes the body and hands it to the pipeline handler, always
-// answering 200 even when the handler panics.
+// answering 200 unless the handler panics.
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	s.logsReceived.Add(1)
 	payload := decodeBody(w, r)
-	accepted, dropped, errStr := invoke(s.handler, payload)
-	body := map[string]any{"accepted": accepted, "dropped": dropped}
-	if errStr != "" {
-		body["error"] = errStr
+	accepted, dropped, panicked := s.invoke(s.handler, payload)
+	if panicked {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "internal error"})
+		return
 	}
-	writeJSON(w, http.StatusOK, body)
+	writeJSON(w, http.StatusOK, map[string]any{"accepted": accepted, "dropped": dropped})
 }
 
-// invoke calls handler, recovering from panics so the response is always
-// produced. A nil handler (no pipeline wired) reports zero accepted/dropped.
-func invoke(handler LogHandler, payload map[string]any) (accepted, dropped int, errStr string) {
+// invoke calls handler, recovering from panics so the process never crashes.
+// A recovered panic is logged locally and never echoed to the caller; a nil
+// handler (no pipeline wired) reports zero accepted/dropped.
+func (s *Server) invoke(
+	handler LogHandler, payload map[string]any,
+) (accepted, dropped int, panicked bool) {
 	defer func() {
 		if rec := recover(); rec != nil {
-			accepted, dropped, errStr = 0, 0, fmt.Sprintf("%v", rec)
+			s.logger.Error("receiver handler panicked", "recover", rec)
+			accepted, dropped, panicked = 0, 0, true
 		}
 	}()
 	if handler == nil {
-		return 0, 0, ""
+		return 0, 0, false
 	}
 	accepted, dropped = handler(payload)
-	return accepted, dropped, ""
+	return accepted, dropped, false
 }
 
 // handleMetrics decodes the body and hands it to the metrics pipeline handler,
-// always answering 200 even when the handler panics.
+// always answering 200 unless the handler panics.
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	s.metricsReceived.Add(1)
 	payload := decodeBody(w, r)
-	accepted, dropped, errStr := invoke(s.metricsHandler, payload)
-	body := map[string]any{"accepted": accepted, "dropped": dropped}
-	if errStr != "" {
-		body["error"] = errStr
+	accepted, dropped, panicked := s.invoke(s.metricsHandler, payload)
+	if panicked {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "internal error"})
+		return
 	}
-	writeJSON(w, http.StatusOK, body)
+	writeJSON(w, http.StatusOK, map[string]any{"accepted": accepted, "dropped": dropped})
 }
 
 // handleHealth returns a counters snapshot for status and doctor.
