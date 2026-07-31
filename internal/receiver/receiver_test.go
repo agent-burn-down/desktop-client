@@ -53,12 +53,12 @@ func post(t *testing.T, s *Server, path, contentType string, body []byte) (int, 
 	return do(t, req)
 }
 
-// forge builds a POST request shaped like a browser-driven forgery: a chosen
-// Content-Type, Host, and Origin, all attacker-controlled. host and origin
-// may be empty to omit the header entirely.
-func forge(t *testing.T, s *Server, path, contentType, host, origin string, body []byte) (int, map[string]any) {
+// forge builds a POST to /v1/logs shaped like a browser-driven forgery: a
+// chosen Content-Type, Host, and Origin, all attacker-controlled. host and
+// origin may be empty to omit the header entirely.
+func forge(t *testing.T, s *Server, contentType, host, origin string, body []byte) (int, map[string]any) {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPost, "http://"+s.Addr()+path, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, "http://"+s.Addr()+"/v1/logs", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +235,7 @@ func TestForgedRequestsRejected(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			status, body := forge(t, s, "/v1/logs", tc.contentType, tc.host, tc.origin,
+			status, body := forge(t, s, tc.contentType, tc.host, tc.origin,
 				[]byte(`{"resourceLogs":[]}`))
 			if status == http.StatusOK {
 				t.Fatalf("status = %d, forged request should not be accepted", status)
@@ -255,13 +255,37 @@ func TestForgedRequestsRejected(t *testing.T) {
 // Origin header (an agent's OTLP exporter never sends one) is still accepted.
 func TestGenuineAgentRequestSucceeds(t *testing.T) {
 	s := startTest(t, Config{Handler: func(map[string]any) (int, int) { return 1, 0 }})
-	status, body := forge(t, s, "/v1/logs", "application/json", "localhost", "",
+	status, body := forge(t, s, "application/json", "localhost", "",
 		[]byte(`{"resourceLogs":[]}`))
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %v", status, body)
 	}
 	if body["accepted"].(float64) != 1 {
 		t.Fatalf("accepted = %v, want 1", body["accepted"])
+	}
+}
+
+// TestOriginCheckAloneRejects isolates the Origin guard, which is the highest-
+// value of the three: it is what actually stops a browser-driven write.
+//
+// Every other forged case pairs a hostile Origin with a hostile Host or a bad
+// Content-Type, so one of those two guards answers first and an Origin-guard
+// regression stays invisible. This case is the realistic attack shape instead —
+// the attacker's page targets the receiver's real address, so the Host is
+// genuinely loopback and the Content-Type is valid JSON. Only the Origin check
+// can reject it. Delete that check and this test is the one that fails.
+func TestOriginCheckAloneRejects(t *testing.T) {
+	s := startTest(t, Config{Handler: func(map[string]any) (int, int) {
+		t.Fatal("handler should not be invoked for a cross-origin request")
+		return 0, 0
+	}})
+	status, body := forge(t, s, "application/json", "localhost",
+		"https://evil.example", []byte(`{"resourceLogs":[]}`))
+	if status != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", status)
+	}
+	if body["error"] == nil {
+		t.Fatalf("expected an error body, got %v", body)
 	}
 }
 
@@ -272,13 +296,38 @@ func TestHostCheckAloneRejects(t *testing.T) {
 		t.Fatal("handler should not be invoked for a non-loopback Host")
 		return 0, 0
 	}})
-	status, body := forge(t, s, "/v1/logs", "application/json", "attacker.example", "",
+	status, body := forge(t, s, "application/json", "attacker.example", "",
 		[]byte(`{"resourceLogs":[]}`))
 	if status != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", status)
 	}
 	if body["error"] == nil {
 		t.Fatalf("expected an error body, got %v", body)
+	}
+}
+
+func TestIsJSONContentType(t *testing.T) {
+	cases := []struct {
+		ct   string
+		want bool
+	}{
+		{"application/json", true},
+		{"application/json; charset=utf-8", true},
+		{"APPLICATION/JSON", true}, // media types are case-insensitive
+		{"application/json-evil", false},
+		{"application/jsonx", false},
+		{"text/plain", false},
+		{"application/x-www-form-urlencoded", false},
+		{"multipart/form-data; boundary=x", false},
+		{"", false},
+		{"not a media type", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.ct, func(t *testing.T) {
+			if got := isJSONContentType(tc.ct); got != tc.want {
+				t.Errorf("isJSONContentType(%q) = %v, want %v", tc.ct, got, tc.want)
+			}
+		})
 	}
 }
 
