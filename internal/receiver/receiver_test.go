@@ -53,6 +53,27 @@ func post(t *testing.T, s *Server, path, contentType string, body []byte) (int, 
 	return do(t, req)
 }
 
+// forge builds a POST request shaped like a browser-driven forgery: a chosen
+// Content-Type, Host, and Origin, all attacker-controlled. host and origin
+// may be empty to omit the header entirely.
+func forge(t *testing.T, s *Server, path, contentType, host, origin string, body []byte) (int, map[string]any) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, "http://"+s.Addr()+path, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	if host != "" {
+		req.Host = host
+	}
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+	return do(t, req)
+}
+
 func do(t *testing.T, req *http.Request) (int, map[string]any) {
 	t.Helper()
 	resp, err := http.DefaultClient.Do(req)
@@ -79,7 +100,7 @@ func TestLogsAlwaysReturns200(t *testing.T) {
 	}{
 		{"valid json", "application/json", []byte(`{"resourceLogs":[]}`)},
 		{"malformed json", "application/json", []byte(`{not json`)},
-		{"wrong content type", "text/plain", []byte(`{"resourceLogs":[]}`)},
+		{"json with charset suffix", "application/json; charset=utf-8", []byte(`{"resourceLogs":[]}`)},
 		{"empty body", "application/json", []byte(``)},
 	}
 	for _, tc := range cases {
@@ -94,6 +115,23 @@ func TestLogsAlwaysReturns200(t *testing.T) {
 		})
 	}
 	_ = lastPayload
+}
+
+// TestWrongContentTypeRejected proves a POST that doesn't declare
+// application/json is refused before it ever reaches the handler, which is
+// what forces a CORS preflight for a browser-driven write.
+func TestWrongContentTypeRejected(t *testing.T) {
+	s := startTest(t, Config{Handler: func(map[string]any) (int, int) {
+		t.Fatal("handler should not be invoked for a rejected content type")
+		return 0, 0
+	}})
+	status, body := post(t, s, "/v1/logs", "text/plain", []byte(`{"resourceLogs":[]}`))
+	if status != http.StatusUnsupportedMediaType {
+		t.Fatalf("status = %d, want 415", status)
+	}
+	if body["error"] == nil {
+		t.Fatalf("expected an error body, got %v", body)
+	}
 }
 
 func TestOversizedBodyReturns200(t *testing.T) {
@@ -111,16 +149,19 @@ func TestOversizedBodyReturns200(t *testing.T) {
 	}
 }
 
-func TestHandlerPanicStill200(t *testing.T) {
+// TestHandlerPanicRecoveredNotLeaked proves a handler panic is recovered
+// (the process doesn't crash), answered with a generic 500 rather than a
+// silent 200, and never echoes the recovered panic text to the caller.
+func TestHandlerPanicRecoveredNotLeaked(t *testing.T) {
 	s := startTest(t, Config{Handler: func(map[string]any) (int, int) {
 		panic("boom")
 	}})
 	status, body := post(t, s, "/v1/logs", "application/json", []byte(`{}`))
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", status)
+	if status != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", status)
 	}
-	if body["error"] == nil || !strings.Contains(fmt.Sprint(body["error"]), "boom") {
-		t.Fatalf("expected recovered error in body, got %v", body)
+	if strings.Contains(fmt.Sprint(body["error"]), "boom") {
+		t.Fatalf("panic text leaked into response body: %v", body)
 	}
 }
 
@@ -158,16 +199,113 @@ func TestMetricsHandlerInvoked(t *testing.T) {
 	}
 }
 
-func TestMetricsHandlerPanicStill200(t *testing.T) {
+// TestMetricsHandlerPanicRecoveredNotLeaked mirrors
+// TestHandlerPanicRecoveredNotLeaked for /v1/metrics.
+func TestMetricsHandlerPanicRecoveredNotLeaked(t *testing.T) {
 	s := startTest(t, Config{MetricsHandler: func(map[string]any) (int, int) {
 		panic("boom")
 	}})
 	status, body := post(t, s, "/v1/metrics", "application/json", []byte(`{}`))
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", status)
+	if status != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", status)
 	}
-	if body["error"] == nil || !strings.Contains(fmt.Sprint(body["error"]), "boom") {
-		t.Fatalf("expected recovered error in body, got %v", body)
+	if strings.Contains(fmt.Sprint(body["error"]), "boom") {
+		t.Fatalf("panic text leaked into response body: %v", body)
+	}
+}
+
+// TestForgedRequestsRejected adapts the issue's PoC table: none of these
+// five forged shapes may reach the pipeline handler.
+func TestForgedRequestsRejected(t *testing.T) {
+	called := false
+	s := startTest(t, Config{Handler: func(map[string]any) (int, int) {
+		called = true
+		return 1, 0
+	}})
+	cases := []struct {
+		name        string
+		contentType string
+		host        string
+		origin      string
+	}{
+		{"no headers at all", "", "", ""},
+		{"text/plain + hostile origin/host", "text/plain", "attacker.example", "https://evil.example"},
+		{"form-urlencoded + hostile origin", "application/x-www-form-urlencoded", "attacker.example", "https://evil.example"},
+		{"multipart + hostile origin", "multipart/form-data", "attacker.example", "https://evil.example"},
+		{"application/json + hostile origin", "application/json", "attacker.example", "https://evil.example"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body := forge(t, s, "/v1/logs", tc.contentType, tc.host, tc.origin,
+				[]byte(`{"resourceLogs":[]}`))
+			if status == http.StatusOK {
+				t.Fatalf("status = %d, forged request should not be accepted", status)
+			}
+			if body["error"] == nil {
+				t.Fatalf("expected an error body, got %v", body)
+			}
+		})
+	}
+	if called {
+		t.Fatal("pipeline handler was invoked by a forged request")
+	}
+}
+
+// TestGenuineAgentRequestSucceeds proves the guards don't collaterally reject
+// real telemetry: a loopback Host, application/json Content-Type, and no
+// Origin header (an agent's OTLP exporter never sends one) is still accepted.
+func TestGenuineAgentRequestSucceeds(t *testing.T) {
+	s := startTest(t, Config{Handler: func(map[string]any) (int, int) { return 1, 0 }})
+	status, body := forge(t, s, "/v1/logs", "application/json", "localhost", "",
+		[]byte(`{"resourceLogs":[]}`))
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %v", status, body)
+	}
+	if body["accepted"].(float64) != 1 {
+		t.Fatalf("accepted = %v, want 1", body["accepted"])
+	}
+}
+
+// TestHostCheckAloneRejects proves the Host guard fires independently of the
+// Origin guard, closing DNS-rebinding requests that carry no Origin header.
+func TestHostCheckAloneRejects(t *testing.T) {
+	s := startTest(t, Config{Handler: func(map[string]any) (int, int) {
+		t.Fatal("handler should not be invoked for a non-loopback Host")
+		return 0, 0
+	}})
+	status, body := forge(t, s, "/v1/logs", "application/json", "attacker.example", "",
+		[]byte(`{"resourceLogs":[]}`))
+	if status != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", status)
+	}
+	if body["error"] == nil {
+		t.Fatalf("expected an error body, got %v", body)
+	}
+}
+
+func TestIsLoopbackHost(t *testing.T) {
+	cases := []struct {
+		host string
+		want bool
+	}{
+		{"127.0.0.1:8765", true},
+		{"127.0.0.1", true},
+		{"localhost:8765", true},
+		{"localhost", true},
+		{"[::1]:8765", true},
+		{"[::1]", true},
+		{"::1", true},
+		{"attacker.example", false},
+		{"attacker.example:8765", false},
+		{"0.0.0.0:8765", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.host, func(t *testing.T) {
+			if got := isLoopbackHost(tc.host); got != tc.want {
+				t.Errorf("isLoopbackHost(%q) = %v, want %v", tc.host, got, tc.want)
+			}
+		})
 	}
 }
 

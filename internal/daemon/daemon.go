@@ -126,6 +126,7 @@ func (d *Daemon) startReceiver(port int) error {
 		Handler:        d.handleLogs,
 		MetricsHandler: d.handleMetrics,
 		Counters:       d.countersSnapshot,
+		Logger:         d.logger,
 	})
 	if err != nil {
 		return err
