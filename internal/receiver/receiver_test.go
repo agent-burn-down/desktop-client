@@ -179,8 +179,7 @@ func TestMetricsCounted(t *testing.T) {
 }
 
 // TestMetricsHandlerInvoked proves /v1/metrics decodes the body and hands it
-// to MetricsHandler, mirroring /v1/logs (TestLogsAlwaysReturns200), and that a
-// panicking metrics handler still answers 200 with the recovered error.
+// to MetricsHandler, mirroring /v1/logs (TestLogsAlwaysReturns200).
 func TestMetricsHandlerInvoked(t *testing.T) {
 	var lastPayload map[string]any
 	s := startTest(t, Config{MetricsHandler: func(p map[string]any) (int, int) {
@@ -292,6 +291,7 @@ func TestIsLoopbackHost(t *testing.T) {
 		{"127.0.0.1", true},
 		{"localhost:8765", true},
 		{"localhost", true},
+		{"LocalHost:8765", true}, // hostnames are case-insensitive
 		{"[::1]:8765", true},
 		{"[::1]", true},
 		{"::1", true},
@@ -299,6 +299,12 @@ func TestIsLoopbackHost(t *testing.T) {
 		{"attacker.example:8765", false},
 		{"0.0.0.0:8765", false},
 		{"", false},
+		// Rebinding and IP-encoding tricks that must not read as loopback.
+		{"127.0.0.1.evil.example", false},
+		{"0177.0.0.1", false}, // octal encoding of 127.0.0.1
+		{"2130706433", false}, // decimal encoding of 127.0.0.1
+		{"localhost.", false}, // fully-qualified form is not what agents send
+		{"127.1", false},      // shorthand some resolvers accept, net.ParseIP does not
 	}
 	for _, tc := range cases {
 		t.Run(tc.host, func(t *testing.T) {

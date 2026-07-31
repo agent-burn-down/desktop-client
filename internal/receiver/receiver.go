@@ -113,7 +113,9 @@ func isLoopbackHost(host string) bool {
 		h = hostOnly
 	}
 	h = strings.TrimPrefix(strings.TrimSuffix(h, "]"), "[")
-	if h == "localhost" {
+	// Hostnames are case-insensitive, and a false 403 here silently stops an
+	// agent's telemetry, so match "localhost" in any case.
+	if strings.EqualFold(h, "localhost") {
 		return true
 	}
 	ip := net.ParseIP(h)
