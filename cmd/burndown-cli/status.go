@@ -10,6 +10,7 @@ import (
 
 	"github.com/agent-burn-down/desktop-client/internal/config"
 	"github.com/agent-burn-down/desktop-client/internal/counters"
+	"github.com/agent-burn-down/desktop-client/internal/credstore"
 	"github.com/agent-burn-down/desktop-client/internal/receiver"
 	"github.com/agent-burn-down/desktop-client/internal/version"
 )
@@ -95,7 +96,7 @@ func runStatus(cmd *cobra.Command, port int, asJSON bool) error {
 // loadStatusConfig loads config best-effort; a missing or unreadable config is
 // not fatal for status, so nil is returned and identity fields stay blank.
 func loadStatusConfig() *config.Config {
-	store, err := config.NewFileStore()
+	store, err := credstore.Open()
 	if err != nil {
 		return nil
 	}

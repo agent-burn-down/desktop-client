@@ -49,6 +49,7 @@ var knownFields = map[string]struct{}{
 	"inventory_status":         {},
 	"inventory_last_upload_at": {},
 	"inventory_item_count":     {},
+	"credential_backend":       {},
 }
 
 const (
@@ -114,6 +115,14 @@ type Config struct {
 	InventoryStatus       string `json:"inventory_status,omitempty"`
 	InventoryLastUploadAt string `json:"inventory_last_upload_at,omitempty"`
 	InventoryItemCount    int    `json:"inventory_item_count,omitempty"`
+
+	// CredentialBackend records where CollectorKey and PendingKey currently
+	// live: "keychain" once internal/credstore has migrated them out of this
+	// file, empty while they are still stored here (the pre-migration state,
+	// and the permanent state on a config store with no keychain backend).
+	// Only internal/credstore sets or interprets this; Config itself treats
+	// it as an opaque marker.
+	CredentialBackend string `json:"credential_backend,omitempty"`
 
 	// extra holds JSON fields not represented by the typed fields above, so
 	// they survive a load/save round-trip.

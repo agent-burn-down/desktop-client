@@ -109,8 +109,16 @@ quickstart:
 
 ```
 burndown-cli service uninstall
+security delete-generic-password -s com.agentburndown.burndown-cli -a collector_key
+security delete-generic-password -s com.agentburndown.burndown-cli -a pending_key
 rm -rf ~/.burndown
 ```
+
+`rm -rf ~/.burndown` alone does not remove the collector key: on a machine
+with a working keychain it lives in the macOS login keychain, not
+`config.json`, and stays valid (org-scoped) until it expires. The `security
+delete-generic-password` commands purge it; the second one only matters mid
+key-rotation and otherwise just prints "could not be found" harmlessly.
 
 Then revert the agent config changes as described in the
 [README uninstall section](https://github.com/agent-burn-down/desktop-client#uninstall).

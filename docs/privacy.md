@@ -94,8 +94,14 @@ retention window is configurable via `retention_days` in
 
 | Path | Contents | Permissions |
 |------|----------|-------------|
-| `~/.burndown/config.json` | Collector key, api url, machine, policy | `0600` |
+| `~/.burndown/config.json` | api url, machine, policy, collector key (only when no OS keychain backend is usable) | `0600` |
 | `~/.burndown/queue.db` | Queued and recently uploaded events | default |
 | `~/.burndown/logs/` | Service stdout and stderr | default |
 
 The config directory itself is created with mode `0700`.
+
+The collector key (and, briefly during rotation, the pending key) is stored in
+the macOS login keychain, not `config.json`, whenever a keychain is available.
+`config.json`'s `0600` permissions are the fallback for platforms or
+environments without one; `burndown-cli doctor` reports which backend is
+currently active.

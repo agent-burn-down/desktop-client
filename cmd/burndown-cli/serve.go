@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/agent-burn-down/desktop-client/internal/config"
+	"github.com/agent-burn-down/desktop-client/internal/credstore"
 	"github.com/agent-burn-down/desktop-client/internal/daemon"
 	"github.com/agent-burn-down/desktop-client/internal/receiver"
 )
@@ -39,7 +40,7 @@ func newServeCmd() *cobra.Command {
 // runServe loads and validates config, builds the daemon, and runs it until a
 // termination signal arrives.
 func runServe(ctx context.Context, port int, verbose bool) error {
-	store, err := config.NewFileStore()
+	store, err := credstore.Open()
 	if err != nil {
 		return err
 	}
