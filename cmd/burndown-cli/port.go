@@ -3,7 +3,7 @@ package main
 import (
 	"github.com/spf13/cobra"
 
-	"github.com/agent-burn-down/desktop-client/internal/config"
+	"github.com/agent-burn-down/desktop-client/internal/credstore"
 )
 
 // resolvePort picks the receiver port doctor/status should probe: an
@@ -23,7 +23,7 @@ func resolvePort(cmd *cobra.Command, flagPort int) int {
 // persistedPort reads the receiver port serve last recorded in config.json,
 // tolerating a missing or unreadable config (fresh install, no serve yet).
 func persistedPort() (int, bool) {
-	store, err := config.NewFileStore()
+	store, err := credstore.Open()
 	if err != nil {
 		return 0, false
 	}

@@ -11,6 +11,7 @@ import (
 	"github.com/agent-burn-down/desktop-client/internal/api"
 	"github.com/agent-burn-down/desktop-client/internal/config"
 	"github.com/agent-burn-down/desktop-client/internal/counters"
+	"github.com/agent-burn-down/desktop-client/internal/credstore"
 	"github.com/agent-burn-down/desktop-client/internal/platform"
 	"github.com/agent-burn-down/desktop-client/internal/queue"
 	"github.com/agent-burn-down/desktop-client/internal/setup"
@@ -62,6 +63,41 @@ func checkConfig(cfg *config.Config, cfgErr error, perms configPerms, path strin
 			fmt.Sprintf("run `chmod 700 %s`", perms.dir))
 	default:
 		return pass("config", "present, key set, permissions 0600/0700")
+	}
+}
+
+// credstoreHint is the remediation for a hard credential-backend failure:
+// the key is known to exist in the keychain but could not be read.
+const credstoreHint = "unlock the login keychain (or run `security unlock-keychain`) and retry"
+
+// checkCredstore reports which backend is protecting the stored collector
+// key: the OS keychain, or the plaintext file fallback. A file fallback
+// that was deliberately chosen (BURNDOWN_CONFIG_DIR override, no keychain
+// on this platform, or nothing stored yet) passes; one caused by a runtime
+// keychain failure warns. A hard credstore.ErrBackendUnavailable load error
+// — the key is known to live in the keychain but could not be read — fails
+// distinctly from a fresh install with no config yet.
+func checkCredstore(cfgErr error, store config.Store) Result {
+	if cfgErr != nil {
+		if errors.Is(cfgErr, credstore.ErrBackendUnavailable) {
+			return fail("credstore", "credential backend unavailable: "+cfgErr.Error(), credstoreHint)
+		}
+		return pass("credstore", "n/a (no config yet)")
+	}
+	reporter, ok := store.(interface {
+		LastBackend() credstore.BackendStatus
+	})
+	if !ok {
+		return pass("credstore", "plaintext file (no credstore wrapper)")
+	}
+	status := reporter.LastBackend()
+	switch {
+	case status.Name == credstore.BackendKeychain:
+		return pass("credstore", "OS keychain: "+status.Detail)
+	case status.Forced:
+		return pass("credstore", "plaintext file: "+status.Detail)
+	default:
+		return warn("credstore", "plaintext file fallback: "+status.Detail, credstoreHint)
 	}
 }
 

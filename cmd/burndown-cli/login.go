@@ -17,6 +17,7 @@ import (
 
 	"github.com/agent-burn-down/desktop-client/internal/api"
 	"github.com/agent-burn-down/desktop-client/internal/config"
+	"github.com/agent-burn-down/desktop-client/internal/credstore"
 	"github.com/agent-burn-down/desktop-client/internal/platform"
 )
 
@@ -110,7 +111,7 @@ func runPasteKeyLogin(cmd *cobra.Command, in loginInput) error {
 	if err != nil {
 		return loginError(err)
 	}
-	store, err := config.NewFileStore()
+	store, err := credstore.Open()
 	if err != nil {
 		return err
 	}
@@ -177,7 +178,7 @@ func finishDeviceLogin(
 	if err != nil {
 		return loginError(err)
 	}
-	store, err := config.NewFileStore()
+	store, err := credstore.Open()
 	if err != nil {
 		return err
 	}
@@ -285,7 +286,7 @@ func newRegisterCmd() *cobra.Command {
 }
 
 func runRegister(cmd *cobra.Command) error {
-	store, err := config.NewFileStore()
+	store, err := credstore.Open()
 	if err != nil {
 		return err
 	}

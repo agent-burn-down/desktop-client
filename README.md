@@ -262,7 +262,7 @@ Run any command with `--help` for its flags. `serve`, `status`, `send-test`, and
 
 ## Uninstall
 
-Remove the collector fully in three steps.
+Remove the collector fully in four steps.
 
 1. Remove the background service:
 
@@ -273,14 +273,30 @@ Remove the collector fully in three steps.
    This boots out the launchd job and deletes
    `~/Library/LaunchAgents/com.agentburndown.collector.plist`.
 
-2. Remove the local state, which includes the config file holding your collector
-   key, the queue database, and the service logs:
+2. Remove your collector key from the macOS login keychain. On a machine with a
+   working keychain, `~/.burndown/config.json` does **not** hold the key —
+   `rm -rf ~/.burndown` alone leaves it live in the keychain until it expires
+   (up to 90 days), and it is org-scoped, so it stays usable for ingest until
+   then:
+
+   ```
+   security delete-generic-password -s com.agentburndown.burndown-cli -a collector_key
+   security delete-generic-password -s com.agentburndown.burndown-cli -a pending_key
+   ```
+
+   The second command only matters if a key rotation was in progress; it exits
+   non-zero and prints "could not be found" harmlessly otherwise. If `doctor`
+   reported the plaintext file fallback instead of the keychain, this step is a
+   no-op and can be skipped.
+
+3. Remove the local state, which includes the config file, the queue database,
+   and the service logs:
 
    ```
    rm -rf ~/.burndown
    ```
 
-3. Revert the agent configs. `setup` backed up each file it changed with a
+4. Revert the agent configs. `setup` backed up each file it changed with a
    timestamped copy, so you can restore those, or remove the keys it added by
    hand.
 
@@ -306,6 +322,12 @@ Remove the collector fully in three steps.
 
    Leave any keys you set yourself; `setup` only adds missing ones, so it never
    owns a value you already had. Restart Claude Code and Codex afterward.
+
+**Downgrading.** A pre-credstore build (before the collector key moved into the
+keychain) does not know to read it from there: it looks at `config.json`, finds
+no `collector_key`, and behaves as if you never logged in — while the old key
+stays live in the keychain until it expires. Run `burndown-cli login` again
+after downgrading, and follow step 2 above if you also want the old key gone.
 
 ## Troubleshooting
 

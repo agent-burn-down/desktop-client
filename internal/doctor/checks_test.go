@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/agent-burn-down/desktop-client/internal/api"
 	"github.com/agent-burn-down/desktop-client/internal/config"
 	"github.com/agent-burn-down/desktop-client/internal/counters"
+	"github.com/agent-burn-down/desktop-client/internal/credstore"
 	"github.com/agent-burn-down/desktop-client/internal/platform"
 	"github.com/agent-burn-down/desktop-client/internal/queue"
 	"github.com/agent-burn-down/desktop-client/internal/setup"
@@ -106,6 +108,50 @@ func TestCheckConfig(t *testing.T) {
 			}
 			if got.Status != Pass && got.Hint == "" {
 				t.Error("non-pass config result missing hint")
+			}
+		})
+	}
+}
+
+// fakeCredstore is a config.Store that also reports a backend status, the
+// same optional capability credstore.Store exposes, so checkCredstore can be
+// tested without touching a real OS keychain.
+type fakeCredstore struct {
+	status credstore.BackendStatus
+}
+
+func (fakeCredstore) Load() (*config.Config, error)          { return &config.Config{}, nil }
+func (fakeCredstore) Save(*config.Config) error              { return nil }
+func (f fakeCredstore) LastBackend() credstore.BackendStatus { return f.status }
+
+func TestCheckCredstore(t *testing.T) {
+	plainStore, err := config.NewFileStore()
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+	tests := []struct {
+		name   string
+		cfgErr error
+		store  config.Store
+		want   Status
+	}{
+		{"no config yet", os.ErrNotExist, nil, Pass},
+		{"backend unavailable", fmt.Errorf("read collector key: %w", credstore.ErrBackendUnavailable), nil, Fail},
+		{"no credstore wrapper", nil, plainStore, Pass},
+		{"keychain active", nil, fakeCredstore{status: credstore.BackendStatus{Name: credstore.BackendKeychain}}, Pass},
+		{"forced file backend", nil,
+			fakeCredstore{status: credstore.BackendStatus{Name: credstore.BackendFile, Forced: true}}, Pass},
+		{"unforced keychain failure", nil,
+			fakeCredstore{status: credstore.BackendStatus{Name: credstore.BackendFile, Detail: "locked"}}, Warn},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := checkCredstore(tc.cfgErr, tc.store)
+			if got.Status != tc.want {
+				t.Errorf("status = %s, want %s (%s)", got.Status, tc.want, got.Detail)
+			}
+			if got.Status != Pass && got.Hint == "" {
+				t.Error("non-pass credstore result missing hint")
 			}
 		})
 	}

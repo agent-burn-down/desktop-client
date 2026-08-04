@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/agent-burn-down/desktop-client/internal/config"
+	"github.com/agent-burn-down/desktop-client/internal/credstore"
 	"github.com/agent-burn-down/desktop-client/internal/platform"
 	"github.com/agent-burn-down/desktop-client/internal/queue"
 	"github.com/agent-burn-down/desktop-client/internal/receiver"
@@ -146,7 +147,7 @@ func New(c Config) (*Doctor, error) {
 // resolvePaths fills the config store, config paths, and queue path defaults.
 func (d *Doctor) resolvePaths(c Config) error {
 	if d.store == nil {
-		store, err := config.NewFileStore()
+		store, err := credstore.Open()
 		if err != nil {
 			return err
 		}
@@ -188,6 +189,7 @@ func (d *Doctor) Run(ctx context.Context) []Result {
 	return []Result{
 		d.checkVersion(ctx),
 		checkConfig(cfg, cfgErr, perms, d.cfgPath),
+		checkCredstore(cfgErr, d.store),
 		d.checkBackend(ctx, cfg, cfgErr),
 		d.checkHeartbeat(ctx, cfg, cfgErr),
 		checkKeyExpiry(cfg, cfgErr),
@@ -237,10 +239,11 @@ func orStr(v, fallback string) string {
 	return v
 }
 
-// configPath returns the config file path, preferring a FileStore's own path.
+// configPath returns the config file path, preferring a store's own path
+// (both config.FileStore and credstore.Store, which wraps one, expose Path).
 func configPath(store config.Store, dir string) string {
-	if fs, ok := store.(*config.FileStore); ok {
-		return fs.Path()
+	if p, ok := store.(interface{ Path() string }); ok {
+		return p.Path()
 	}
 	return dir + "/config.json"
 }
