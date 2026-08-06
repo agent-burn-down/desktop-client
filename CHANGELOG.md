@@ -4,12 +4,36 @@ All notable changes to `burndown-cli` are documented here.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-05
+
+### Security
+
+- The receiver now rejects cross-origin, off-host and non-JSON writes. It is a
+  loopback-only listener, but a page in the user's browser could previously
+  POST to it; the Origin guard and stricter `Content-Type` parsing close that
+  (#66).
+
+### Added
+
+- The collector key is stored in the macOS keychain instead of on disk. The key
+  is read back through the `security` tool, so the released `CGO_ENABLED=0`
+  binaries keep working (#67).
+
+> Note: `0.6.0` through `0.7.1` were released without changelog entries. The two
+> items previously sitting under "Unreleased" had in fact already shipped, and
+> are filed below under the releases that contained them. Those sections are
+> partial — they list only what was recoverable, not everything in the release.
+
+## [0.7.0] - 2026-07-21
+
 ### Fixed
 
 - `doctor` and `status` now probe the receiver port `serve` last actually ran
   on (persisted to config.json), instead of always defaulting to 8765. This
   also fixes `doctor` incorrectly flagging Codex OTEL settings as missing when
   they were written for a non-default port (#59).
+
+## [0.6.0] - 2026-07-17
 
 ### Changed
 
