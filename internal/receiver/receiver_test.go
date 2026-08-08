@@ -415,6 +415,31 @@ func TestTokenMissingCounted(t *testing.T) {
 	}
 }
 
+// TestWrongTokenSameLengthRejected guards against a length-only comparison
+// bug: a wrong token exactly as long as the real one (both realistic
+// generateToken()-shaped 64-char hex strings, differing only in the last
+// byte) must still be rejected. A test built on tokens of differing length
+// wouldn't catch a broken constant-time comparison that only checks length.
+func TestWrongTokenSameLengthRejected(t *testing.T) {
+	const real = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const wrong = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab"
+	if len(real) != len(wrong) {
+		t.Fatalf("test fixture bug: fixtures must be the same length (%d vs %d)", len(real), len(wrong))
+	}
+	called := false
+	s := startTest(t, Config{Token: real, Handler: func(map[string]any) (int, int) {
+		called = true
+		return 1, 0
+	}})
+	status, body := postWithToken(t, s, "/v1/logs", wrong)
+	if status != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401: %v", status, body)
+	}
+	if called {
+		t.Fatal("pipeline handler was invoked despite a wrong same-length token")
+	}
+}
+
 // TestPreTokenInstallKeepsReporting is the regression that matters most: an
 // install with no token in its config (never re-run `setup` since the token
 // was introduced) and agents that send no token header must keep reporting,

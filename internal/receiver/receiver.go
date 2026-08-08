@@ -6,6 +6,7 @@ package receiver
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -217,13 +218,18 @@ func (s *Server) reject(w http.ResponseWriter, r *http.Request) bool {
 // an absent token — that is the phase-2 change, deliberately not made here so
 // installs that have not re-run `setup` since the token was introduced don't
 // silently stop reporting.
+//
+// The attacker this token defends against is any other local process on the
+// same workstation — exactly the position to run a timing oracle against a
+// loopback endpoint (no network jitter, unlimited requests). The comparison
+// must run in constant time; subtle.ConstantTimeCompare, not ==.
 func (s *Server) rejectToken(w http.ResponseWriter, r *http.Request) bool {
 	got := r.Header.Get(TokenHeader)
 	if got == "" {
 		s.tokenMissing.Add(1)
 		return false
 	}
-	if got != s.token {
+	if subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) != 1 {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid token"})
 		return true
 	}
