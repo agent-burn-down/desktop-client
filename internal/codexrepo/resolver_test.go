@@ -118,7 +118,7 @@ func TestResolveCollapsesGitWorktreeToCanonicalRepo(t *testing.T) {
 	}
 	home := t.TempDir()
 	mainRepo := filepath.Join(t.TempDir(), "canonical-repo")
-	mustRun(t, "git", "init", mainRepo)
+	mustRun(t, "init", mainRepo)
 	mustGitIn(t, mainRepo, "config", "user.email", "test@example.com")
 	mustGitIn(t, mainRepo, "config", "user.name", "Test")
 	if err := os.WriteFile(filepath.Join(mainRepo, "README"), []byte("test\n"), 0o600); err != nil {
@@ -178,6 +178,49 @@ func TestCanonicalRepoBoundsProjectLabelForAPIContract(t *testing.T) {
 	}
 }
 
+func TestResolveKeyCachedAlongsideRepo(t *testing.T) {
+	home := t.TempDir()
+	repo := filepath.Join(t.TempDir(), "keyed-repo")
+	mustMkdir(t, repo)
+	path := sessionPath(home, testConversationID)
+	writeSession(t, path, line("session_meta", testConversationID, repo))
+
+	r := New(home)
+	if got := r.Resolve(testConversationID); got != "keyed-repo" {
+		t.Fatalf("Resolve = %q, want keyed-repo", got)
+	}
+	if got := r.ResolveKey(testConversationID); got == "" || !strings.HasPrefix(got, "local:") {
+		t.Fatalf("ResolveKey = %q, want local: prefix", got)
+	}
+}
+
+func TestResolveClaudeKeyCachedAlongsideRepo(t *testing.T) {
+	codexHome := t.TempDir()
+	claudeHome := t.TempDir()
+	repo := filepath.Join(t.TempDir(), "claude-keyed-repo")
+	mustMkdir(t, repo)
+	path := filepath.Join(claudeHome, "projects", "-Users-test-project", testConversationID+".jsonl")
+	writeSession(t, path, claudeLine(repo))
+
+	r := NewWithHomes(codexHome, claudeHome)
+	if got := r.ResolveClaude(testConversationID); got != "claude-keyed-repo" {
+		t.Fatalf("ResolveClaude = %q, want claude-keyed-repo", got)
+	}
+	if got := r.ResolveClaudeKey(testConversationID); got == "" || !strings.HasPrefix(got, "local:") {
+		t.Fatalf("ResolveClaudeKey = %q, want local: prefix", got)
+	}
+}
+
+func TestResolveKeyEmptyWhenUnresolvable(t *testing.T) {
+	r := New(t.TempDir())
+	if got := r.ResolveKey("not-a-uuid"); got != "" {
+		t.Fatalf("ResolveKey(invalid id) = %q, want \"\"", got)
+	}
+	if got := r.ResolveKey(testConversationID); got != "" {
+		t.Fatalf("ResolveKey(unknown session) = %q, want \"\"", got)
+	}
+}
+
 func sessionPath(home, id string) string {
 	return filepath.Join(home, "sessions", "2026", "07", "14", "rollout-2026-07-14T00-00-00-"+id+".jsonl")
 }
@@ -205,10 +248,10 @@ func mustMkdir(t *testing.T, path string) {
 	}
 }
 
-func mustRun(t *testing.T, name string, args ...string) {
+func mustRun(t *testing.T, args ...string) {
 	t.Helper()
-	if out, err := exec.Command(name, args...).CombinedOutput(); err != nil {
-		t.Fatalf("%s %v: %v: %s", name, args, err, out)
+	if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, out)
 	}
 }
 
