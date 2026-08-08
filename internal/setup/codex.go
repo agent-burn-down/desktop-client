@@ -85,6 +85,13 @@ func PlanCodex(port int, token string) (*CodexPlan, error) {
 // codexExporterTable renders the [otel].exporter inline table: the receiver
 // endpoint, JSON protocol, and the per-installation token as an OTLP header,
 // mirroring Claude's OTEL_EXPORTER_OTLP_HEADERS.
+//
+// Codex performs "${VAR}" environment substitution on header values in this
+// table. token is always generateToken()'s hex output, which cannot contain
+// "${", so that substitution never fires here. This is a property of the hex
+// alphabet, not something enforced at this call site — pin it if
+// generateToken ever changes encoding (e.g. to base64, whose alphabet also
+// excludes "${") or this ever takes a user-supplied value instead.
 func codexExporterTable(endpoint, token string) string {
 	return fmt.Sprintf(
 		`{ otlp-http = { endpoint = "%s", protocol = "json", headers = { "%s" = "%s" } } }`,
