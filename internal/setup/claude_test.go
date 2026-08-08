@@ -8,6 +8,10 @@ import (
 	"testing"
 )
 
+// testClaudeToken is the receiver token used by claude_test.go's PlanClaude
+// calls.
+const testClaudeToken = "claude-test-token"
+
 // readClaudeEnv decodes settings.json and returns its env object.
 func readClaudeEnv(t *testing.T, path string) map[string]any {
 	t.Helper()
@@ -27,7 +31,7 @@ func TestPlanClaudeFreshAddsAllKeys(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv(EnvClaudeDir, dir)
 
-	plan, err := PlanClaude(9000)
+	plan, err := PlanClaude(9000, testClaudeToken)
 	if err != nil {
 		t.Fatalf("PlanClaude: %v", err)
 	}
@@ -55,6 +59,50 @@ func TestPlanClaudeFreshAddsAllKeys(t *testing.T) {
 	}
 }
 
+// TestClaudeHeaderCarriesToken proves the receiver token is written in the
+// OTEL_EXPORTER_OTLP_HEADERS format the collector's receiver expects.
+func TestClaudeHeaderCarriesToken(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(EnvClaudeDir, dir)
+
+	plan, err := PlanClaude(8765, testClaudeToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plan.Apply(); err != nil {
+		t.Fatal(err)
+	}
+	env := readClaudeEnv(t, filepath.Join(dir, "settings.json"))
+	want := "X-Burndown-Token=" + testClaudeToken
+	if env["OTEL_EXPORTER_OTLP_HEADERS"] != want {
+		t.Fatalf("OTEL_EXPORTER_OTLP_HEADERS = %v, want %q", env["OTEL_EXPORTER_OTLP_HEADERS"], want)
+	}
+}
+
+// TestClaudeDescriptionsNeverLeakToken proves the printed plan never contains
+// the raw receiver token, even though the written file does.
+func TestClaudeDescriptionsNeverLeakToken(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(EnvClaudeDir, dir)
+
+	plan, err := PlanClaude(8765, testClaudeToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, line := range plan.Descriptions() {
+		if strings.Contains(line, testClaudeToken) {
+			t.Fatalf("plan description leaked the token: %q", line)
+		}
+		if line == "OTEL_EXPORTER_OTLP_HEADERS=<redacted>" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a redacted OTEL_EXPORTER_OTLP_HEADERS line, got %v", plan.Descriptions())
+	}
+}
+
 func TestPlanClaudePreservesUserValues(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv(EnvClaudeDir, dir)
@@ -71,7 +119,7 @@ func TestPlanClaudePreservesUserValues(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := PlanClaude(8765)
+	plan, err := PlanClaude(8765, testClaudeToken)
 	if err != nil {
 		t.Fatalf("PlanClaude: %v", err)
 	}
@@ -114,7 +162,7 @@ func TestPlanClaudeRefusesNonObjectEnv(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"env": "not-an-object"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := PlanClaude(8765); err == nil {
+	if _, err := PlanClaude(8765, testClaudeToken); err == nil {
 		t.Fatal("expected refusal for non-object env")
 	}
 }
@@ -126,7 +174,7 @@ func TestPlanClaudeRefusesInvalidJSON(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{not valid`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := PlanClaude(8765); err == nil {
+	if _, err := PlanClaude(8765, testClaudeToken); err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
 }
@@ -139,7 +187,7 @@ func TestClaudeSecondRunNoOp(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"env":{"CLAUDE_CODE_ENABLE_TELEMETRY":"1"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	first, err := PlanClaude(8765)
+	first, err := PlanClaude(8765, testClaudeToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +205,7 @@ func TestClaudeSecondRunNoOp(t *testing.T) {
 	backupsBefore := countBackups(t, dir, ".json.bak.")
 
 	// Second plan must be a no-op: nothing to add.
-	second, err := PlanClaude(8765)
+	second, err := PlanClaude(8765, testClaudeToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +229,7 @@ func TestClaudeBackupMatchesOriginal(t *testing.T) {
 	if err := os.WriteFile(path, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	plan, err := PlanClaude(8765)
+	plan, err := PlanClaude(8765, testClaudeToken)
 	if err != nil {
 		t.Fatal(err)
 	}

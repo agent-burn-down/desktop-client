@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/agent-burn-down/desktop-client/internal/receiver"
 )
 
 // tableHeaderRe matches a TOML table header line such as "[otel]" or
@@ -46,10 +48,11 @@ var codexScalars = []struct {
 	{"log_user_prompt", "false", false},
 }
 
-// PlanCodex computes the pending config.toml edits for the given receiver port.
-// The four scalar [otel] keys are inserted only when absent (existing values
-// preserved); otel.exporter is replaced-or-inserted; and any stale nested
-// otel.exporter."otlp-http" / otel.exporter.otlp-http tables are removed.
+// PlanCodex computes the pending config.toml edits for the given receiver port
+// and receiver token. The four scalar [otel] keys are inserted only when absent
+// (existing values preserved); otel.exporter is replaced-or-inserted; and any
+// stale nested otel.exporter."otlp-http" / otel.exporter.otlp-http tables are
+// removed.
 //
 // When the edit would change anything, the result is parsed with a real TOML
 // parser AND structurally asserted: the [otel] table must actually hold every
@@ -57,7 +60,7 @@ var codexScalars = []struct {
 // (for example a triple-quoted string with an unbalanced bracket steering keys
 // into the wrong table), the edit is refused and the file left untouched, so
 // the writer can never corrupt the file or silently misconfigure Codex.
-func PlanCodex(port int) (*CodexPlan, error) {
+func PlanCodex(port int, token string) (*CodexPlan, error) {
 	dir, err := CodexDir()
 	if err != nil {
 		return nil, err
@@ -67,10 +70,10 @@ func PlanCodex(port int) (*CodexPlan, error) {
 	if err != nil {
 		return nil, err
 	}
-	text, changes, added := editCodex(text, port)
+	text, changes, added := editCodex(text, port, token)
 	plan := &CodexPlan{Path: path, text: text, changes: changes}
 	if !plan.Empty() {
-		if err := verifyCodexEdit(text, port, added); err != nil {
+		if err := verifyCodexEdit(text, port, token, added); err != nil {
 			return nil, fmt.Errorf(
 				"refusing to edit %s: %w; add the [otel] settings manually; "+
 					"file left unchanged", path, err)
@@ -79,13 +82,30 @@ func PlanCodex(port int) (*CodexPlan, error) {
 	return plan, nil
 }
 
+// codexExporterTable renders the [otel].exporter inline table: the receiver
+// endpoint, JSON protocol, and the per-installation token as an OTLP header,
+// mirroring Claude's OTEL_EXPORTER_OTLP_HEADERS.
+//
+// Codex performs "${VAR}" environment substitution on header values in this
+// table. token is always generateToken()'s hex output, which cannot contain
+// "${", so that substitution never fires here. This is a property of the hex
+// alphabet, not something enforced at this call site — pin it if
+// generateToken ever changes encoding (e.g. to base64, whose alphabet also
+// excludes "${") or this ever takes a user-supplied value instead.
+func codexExporterTable(endpoint, token string) string {
+	return fmt.Sprintf(
+		`{ otlp-http = { endpoint = "%s", protocol = "json", headers = { "%s" = "%s" } } }`,
+		endpoint, receiver.TokenHeader, token)
+}
+
 // editCodex applies the four scalar-key insertions and the exporter edit,
 // returning the new text, a description of each change made, and the set of
 // scalar keys actually inserted (key -> expected decoded value) for assertion.
-func editCodex(text string, port int) (string, []string, map[string]any) {
+// The exporter change description never includes the token — it must not be
+// logged.
+func editCodex(text string, port int, token string) (string, []string, map[string]any) {
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d/v1/logs", port)
-	desiredExporter := fmt.Sprintf(
-		`{ otlp-http = { endpoint = "%s", protocol = "json" } }`, endpoint)
+	desiredExporter := codexExporterTable(endpoint, token)
 
 	var changes []string
 	added := make(map[string]any)
@@ -100,7 +120,7 @@ func editCodex(text string, port int) (string, []string, map[string]any) {
 	var changed bool
 	text, changed = ensureCodexExporter(text, desiredExporter)
 	if changed {
-		changes = append(changes, "otel.exporter = "+desiredExporter)
+		changes = append(changes, "otel.exporter = "+codexExporterTable(endpoint, "<redacted>"))
 	}
 	if text != "" && !strings.HasSuffix(text, "\n") {
 		text += "\n"
@@ -112,7 +132,7 @@ func editCodex(text string, port int) (string, []string, map[string]any) {
 // scalar with its intended value plus a correct exporter. A parse error (which
 // BurntSushi also raises on duplicate keys) or a missing/wrong value is
 // returned so the caller can refuse to write.
-func verifyCodexEdit(text string, port int, added map[string]any) error {
+func verifyCodexEdit(text string, port int, token string, added map[string]any) error {
 	var doc map[string]any
 	if _, err := toml.Decode(text, &doc); err != nil {
 		return fmt.Errorf("the change would produce invalid TOML (%w)", err)
@@ -127,12 +147,12 @@ func verifyCodexEdit(text string, port int, added map[string]any) error {
 				key, otel[key], want)
 		}
 	}
-	return assertCodexExporter(otel, port)
+	return assertCodexExporter(otel, port, token)
 }
 
 // assertCodexExporter checks the [otel].exporter inline table points at the
-// expected local endpoint over JSON.
-func assertCodexExporter(otel map[string]any, port int) error {
+// expected local endpoint over JSON and carries the expected token header.
+func assertCodexExporter(otel map[string]any, port int, token string) error {
 	exporter, ok := otel["exporter"].(map[string]any)
 	if !ok {
 		return fmt.Errorf("[otel].exporter is missing after the edit")
@@ -147,6 +167,14 @@ func assertCodexExporter(otel map[string]any, port int) error {
 	}
 	if inner["protocol"] != "json" {
 		return fmt.Errorf("[otel].exporter protocol = %v, want json", inner["protocol"])
+	}
+	headers, ok := inner["headers"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("[otel].exporter.otlp-http.headers is missing after the edit")
+	}
+	if headers[receiver.TokenHeader] != token {
+		return fmt.Errorf("[otel].exporter.otlp-http.headers[%s] did not land as expected",
+			receiver.TokenHeader)
 	}
 	return nil
 }

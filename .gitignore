@@ -5,3 +5,4 @@ site/
 coverage.out
 .DS_Store
 .memsearch/.index.pid
+.worktrees/

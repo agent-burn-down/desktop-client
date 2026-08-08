@@ -112,7 +112,7 @@ func assemble(opts Options, dir string, logger *slog.Logger, logFile io.Closer) 
 		InventoryStatus:       cfg.InventoryStatus,
 		InventoryLastUploadAt: cfg.InventoryLastUploadAt,
 	})
-	if err := d.startReceiver(opts.Port); err != nil {
+	if err := d.startReceiver(opts.Port, cfg.ReceiverToken); err != nil {
 		_ = q.Close()
 		return nil, err
 	}
@@ -120,13 +120,14 @@ func assemble(opts Options, dir string, logger *slog.Logger, logFile io.Closer) 
 }
 
 // startReceiver builds and binds the loopback receiver.
-func (d *Daemon) startReceiver(port int) error {
+func (d *Daemon) startReceiver(port int, token string) error {
 	srv, err := receiver.New(receiver.Config{
 		Port:           port,
 		Handler:        d.handleLogs,
 		MetricsHandler: d.handleMetrics,
 		Counters:       d.countersSnapshot,
 		Logger:         d.logger,
+		Token:          token,
 	})
 	if err != nil {
 		return err

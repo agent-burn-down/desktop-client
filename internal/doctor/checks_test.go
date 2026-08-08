@@ -376,7 +376,7 @@ func TestCheckAgents(t *testing.T) {
 	}
 	t.Setenv("BURNDOWN_CLAUDE_DIR", claudeDir)
 	t.Setenv("BURNDOWN_CODEX_DIR", codexDir)
-	r := checkAgents(8765)
+	r := checkAgents(8765, nil, os.ErrNotExist)
 	if r.Status != Fail || r.Hint == "" {
 		t.Errorf("misconfigured agents should fail with hint: %+v", r)
 	}
@@ -395,7 +395,8 @@ func TestCheckAgentsAcceptsSetupWriterOutput(t *testing.T) {
 	t.Setenv("PATH", "")
 
 	const port = 8766
-	plan, err := setup.PlanCodex(port)
+	const token = "check-agents-token"
+	plan, err := setup.PlanCodex(port, token)
 	if err != nil {
 		t.Fatalf("PlanCodex: %v", err)
 	}
@@ -403,11 +404,36 @@ func TestCheckAgentsAcceptsSetupWriterOutput(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 
-	if r := checkAgents(port); r.Status != Pass {
+	cfg := &config.Config{ReceiverToken: token}
+	if r := checkAgents(port, cfg, nil); r.Status != Pass {
 		t.Errorf("doctor should accept setup's own output at the same port: %+v", r)
 	}
-	if r := checkAgents(port + 1); r.Status != Fail {
+	if r := checkAgents(port+1, cfg, nil); r.Status != Fail {
 		t.Errorf("mismatched port should still fail: %+v", r)
+	}
+}
+
+// TestCheckAgentsTokenMismatchFails proves a stale token in config.json (for
+// example after a manual edit) is caught the same way a port drift is.
+func TestCheckAgentsTokenMismatchFails(t *testing.T) {
+	codexDir := t.TempDir()
+	missingClaudeDir := filepath.Join(t.TempDir(), "does-not-exist")
+	t.Setenv("BURNDOWN_CODEX_DIR", codexDir)
+	t.Setenv("BURNDOWN_CLAUDE_DIR", missingClaudeDir)
+	t.Setenv("PATH", "")
+
+	const port = 8766
+	plan, err := setup.PlanCodex(port, "written-token")
+	if err != nil {
+		t.Fatalf("PlanCodex: %v", err)
+	}
+	if _, err := plan.Apply(); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	cfg := &config.Config{ReceiverToken: "different-token"}
+	if r := checkAgents(port, cfg, nil); r.Status != Fail {
+		t.Errorf("token drift should fail: %+v", r)
 	}
 }
 
@@ -418,7 +444,7 @@ func TestCheckAgentsNoneDetected(t *testing.T) {
 	t.Setenv("BURNDOWN_CLAUDE_DIR", missing)
 	t.Setenv("BURNDOWN_CODEX_DIR", missing)
 	t.Setenv("PATH", "")
-	r := checkAgents(8765)
+	r := checkAgents(8765, nil, os.ErrNotExist)
 	if r.Status != Warn || r.Hint == "" {
 		t.Errorf("no agents should warn with hint: %+v", r)
 	}

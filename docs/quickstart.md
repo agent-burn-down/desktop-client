@@ -80,6 +80,7 @@ What it writes to `~/.claude/settings.json` (under `env`):
 | `OTEL_METRICS_EXPORTER` | `otlp` |
 | `OTEL_LOGS_EXPORTER` | `otlp` |
 | `OTEL_LOG_TOOL_DETAILS` | `1` |
+| `OTEL_EXPORTER_OTLP_HEADERS` | `X-Burndown-Token=<generated per-installation token>` |
 
 What it writes to `~/.codex/config.toml` (under `[otel]`):
 
@@ -89,7 +90,12 @@ What it writes to `~/.codex/config.toml` (under `[otel]`):
 | `metrics_exporter` | `"none"` |
 | `trace_exporter` | `"none"` |
 | `log_user_prompt` | `false` |
-| `exporter` | `{ otlp-http = { endpoint = "http://127.0.0.1:8765/v1/logs", protocol = "json" } }` |
+| `exporter` | `{ otlp-http = { endpoint = "http://127.0.0.1:8765/v1/logs", protocol = "json", headers = { "X-Burndown-Token" = "<generated per-installation token>" } } }` |
+
+The token is generated once (via `crypto/rand`) and stored in `config.json`;
+re-running `setup` reuses it rather than rotating it. The receiver currently
+still accepts a request with no token — this is a tolerate phase ahead of a
+future release that requires it.
 
 Note `log_user_prompt = false`: Codex never sends prompt text to the collector.
 
@@ -101,7 +107,10 @@ Useful flags:
 - `--port <port>` — point agents at a non-default receiver port.
 - `--yes` — skip the confirmation prompt.
 
-Restart Claude Code and Codex afterward so they pick up the new settings.
+Restart Claude Code and Codex afterward so they pick up the new settings. If the
+collector daemon is already running as the managed service, `setup` restarts it
+automatically so it picks up the new token; otherwise it prints a reminder to
+restart it yourself.
 
 ## 4. Install the background service
 

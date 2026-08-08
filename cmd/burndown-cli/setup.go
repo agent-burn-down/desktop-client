@@ -7,6 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/agent-burn-down/desktop-client/internal/credstore"
+	"github.com/agent-burn-down/desktop-client/internal/platform"
 	"github.com/agent-burn-down/desktop-client/internal/receiver"
 	"github.com/agent-burn-down/desktop-client/internal/setup"
 )
@@ -87,8 +89,9 @@ type targets struct {
 	claudeDir, codexDir string
 }
 
-// gatherPlans resolves targets, reports detection honestly, and builds each
-// selected agent's plan.
+// gatherPlans resolves targets, reports detection honestly, ensures the
+// per-installation receiver token exists, and builds each selected agent's
+// plan.
 func gatherPlans(cmd *cobra.Command, f *setupFlags) ([]agentPlan, error) {
 	t, err := resolveTargets(f)
 	if err != nil {
@@ -97,7 +100,18 @@ func gatherPlans(cmd *cobra.Command, f *setupFlags) ([]agentPlan, error) {
 	out := cmd.OutOrStdout()
 	reportDetection(out, "Claude Code", t.claudeDir, t.detClaude, t.claude)
 	reportDetection(out, "Codex", t.codexDir, t.detCodex, t.codex)
-	return buildPlans(t, f.port)
+	if !t.claude && !t.codex {
+		return nil, nil
+	}
+	store, err := credstore.Open()
+	if err != nil {
+		return nil, err
+	}
+	token, err := setup.EnsureReceiverToken(store)
+	if err != nil {
+		return nil, err
+	}
+	return buildPlans(t, f.port, token)
 }
 
 // resolveTargets runs detection and applies the force flags to decide which
@@ -129,17 +143,17 @@ func selectAgents(f *setupFlags, detClaude, detCodex bool) (claude, codex bool) 
 }
 
 // buildPlans computes the pending change set for each selected agent.
-func buildPlans(t targets, port int) ([]agentPlan, error) {
+func buildPlans(t targets, port int, token string) ([]agentPlan, error) {
 	var plans []agentPlan
 	if t.claude {
-		p, err := setup.PlanClaude(port)
+		p, err := setup.PlanClaude(port, token)
 		if err != nil {
 			return nil, err
 		}
 		plans = append(plans, agentPlan{name: "Claude Code", plan: p})
 	}
 	if t.codex {
-		p, err := setup.PlanCodex(port)
+		p, err := setup.PlanCodex(port, token)
 		if err != nil {
 			return nil, err
 		}
@@ -194,7 +208,46 @@ func applyPlans(w io.Writer, plans []agentPlan) error {
 		outf(w, "%s: updated\n", ap.name)
 	}
 	outln(w, "Restart Claude Code and Codex so the new OTEL settings take effect.")
+	restartCollectorService(w)
 	return nil
+}
+
+// newPlatformService resolves the platform service; a package var so tests
+// can stub it and never touch a real launchd job.
+var newPlatformService = platform.New
+
+// restartCollectorService restarts the background collector daemon, if it is
+// running as the managed service, so it picks up the token this run just
+// wrote — without this, a daemon already running with no token loaded (or an
+// old one) keeps rejecting the now-tokened agent requests with 401 until it
+// happens to restart on its own. A restart failure here is never fatal to
+// `setup`: the agent config files, the actual deliverable, are already
+// written. When the daemon isn't running as the managed service (not
+// installed, not darwin, or run manually via `serve` in another terminal),
+// there is nothing this process can restart, so it falls back to telling the
+// operator to do it themselves.
+func restartCollectorService(w io.Writer) {
+	svc, err := newPlatformService()
+	if err != nil {
+		promptManualDaemonRestart(w)
+		return
+	}
+	status, err := svc.Status()
+	if err != nil || status.State != platform.StateRunning {
+		promptManualDaemonRestart(w)
+		return
+	}
+	if err := svc.Start(); err != nil {
+		outf(w, "warning: could not restart the collector service automatically: %v\n", err)
+		promptManualDaemonRestart(w)
+		return
+	}
+	outln(w, "Collector service restarted so it picks up the new token.")
+}
+
+func promptManualDaemonRestart(w io.Writer) {
+	outln(w, "If the collector daemon is already running, restart it "+
+		"(`burndown-cli service start`, or restart `serve`) so it picks up the new token.")
 }
 
 // confirm prompts for confirmation, defaulting to yes on an empty line.

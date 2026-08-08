@@ -364,6 +364,141 @@ func TestIsLoopbackHost(t *testing.T) {
 	}
 }
 
+// TestTokenTolerated covers the tolerate-phase contract on both write
+// endpoints: no token is accepted (and counted), the configured token is
+// accepted, and a present-but-wrong token is rejected with 401.
+func TestTokenTolerated(t *testing.T) {
+	const token = "correct-token"
+	for _, path := range []string{"/v1/logs", "/v1/metrics"} {
+		t.Run(path, func(t *testing.T) {
+			var called bool
+			handler := func(map[string]any) (int, int) { called = true; return 1, 0 }
+			s := startTest(t, Config{Token: token, Handler: handler, MetricsHandler: handler})
+
+			cases := []struct {
+				name       string
+				sendToken  string
+				wantStatus int
+			}{
+				{"no token", "", http.StatusOK},
+				{"correct token", token, http.StatusOK},
+				{"wrong token", "not-the-token", http.StatusUnauthorized},
+			}
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					called = false
+					status, body := postWithToken(t, s, path, tc.sendToken)
+					if status != tc.wantStatus {
+						t.Fatalf("status = %d, want %d: %v", status, tc.wantStatus, body)
+					}
+					if wantCalled := tc.wantStatus == http.StatusOK; called != wantCalled {
+						t.Fatalf("handler invoked = %v, want %v", called, wantCalled)
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestTokenMissingCounted proves a request with no token increments the
+// "token_missing" /healthz counter — the signal that gates enforcing the
+// token in a later release.
+func TestTokenMissingCounted(t *testing.T) {
+	s := startTest(t, Config{Token: "shh", Handler: func(map[string]any) (int, int) { return 1, 0 }})
+	postWithToken(t, s, "/v1/logs", "")
+	postWithToken(t, s, "/v1/logs", "")
+	postWithToken(t, s, "/v1/logs", "shh") // carries the real token; must not count
+	_, health := healthGet(t, s)
+	counters := health["counters"].(map[string]any)
+	if got := counters["token_missing"].(float64); got != 2 {
+		t.Fatalf("token_missing = %v, want 2", got)
+	}
+}
+
+// TestWrongTokenSameLengthRejected guards against a length-only comparison
+// bug: a wrong token exactly as long as the real one (both realistic
+// generateToken()-shaped 64-char hex strings, differing only in the last
+// byte) must still be rejected. A test built on tokens of differing length
+// wouldn't catch a broken constant-time comparison that only checks length.
+func TestWrongTokenSameLengthRejected(t *testing.T) {
+	const real = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const wrong = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab"
+	if len(real) != len(wrong) {
+		t.Fatalf("test fixture bug: fixtures must be the same length (%d vs %d)", len(real), len(wrong))
+	}
+	called := false
+	s := startTest(t, Config{Token: real, Handler: func(map[string]any) (int, int) {
+		called = true
+		return 1, 0
+	}})
+	status, body := postWithToken(t, s, "/v1/logs", wrong)
+	if status != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401: %v", status, body)
+	}
+	if called {
+		t.Fatal("pipeline handler was invoked despite a wrong same-length token")
+	}
+}
+
+// TestEmptyConfiguredTokenToleratesAnyPresentedToken is the case
+// TestPreTokenInstallKeepsReporting doesn't cover: the daemon has no token
+// loaded (s.token == ""; a pre-token config, or `setup` generated a token
+// after this `serve` process already started and hasn't been restarted), and
+// the request *does* carry a token — because the agent was reconfigured by a
+// `setup` run the daemon doesn't know about yet. This must still be accepted,
+// not 401: the receiver has nothing to validate the presented token against,
+// and rejecting here would 401 real telemetry the moment an operator does the
+// right thing and reruns `setup`, which is exactly what tolerate-phase exists
+// to prevent.
+func TestEmptyConfiguredTokenToleratesAnyPresentedToken(t *testing.T) {
+	called := false
+	s := startTest(t, Config{Handler: func(map[string]any) (int, int) {
+		called = true
+		return 1, 0
+	}})
+	status, body := postWithToken(t, s, "/v1/logs", "some-token-the-daemon-has-never-heard-of")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %v", status, body)
+	}
+	if !called {
+		t.Fatal("handler was not invoked")
+	}
+	if body["accepted"].(float64) != 1 {
+		t.Fatalf("accepted = %v, want 1", body["accepted"])
+	}
+}
+
+// TestPreTokenInstallKeepsReporting is the regression that matters most: an
+// install with no token in its config (never re-run `setup` since the token
+// was introduced) and agents that send no token header must keep reporting,
+// not start getting 401s.
+func TestPreTokenInstallKeepsReporting(t *testing.T) {
+	s := startTest(t, Config{Handler: func(map[string]any) (int, int) { return 1, 0 }})
+	status, body := postWithToken(t, s, "/v1/logs", "")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %v", status, body)
+	}
+	if body["accepted"].(float64) != 1 {
+		t.Fatalf("accepted = %v, want 1", body["accepted"])
+	}
+}
+
+// postWithToken posts a well-formed request to path, setting TokenHeader only
+// when token is non-empty.
+func postWithToken(t *testing.T, s *Server, path, token string) (int, map[string]any) {
+	t.Helper()
+	body := []byte(`{"resourceLogs":[]}`)
+	req, err := http.NewRequest(http.MethodPost, "http://"+s.Addr()+path, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set(TokenHeader, token)
+	}
+	return do(t, req)
+}
+
 func TestHealthzCountersMerged(t *testing.T) {
 	s := startTest(t, Config{Counters: func() map[string]int64 {
 		return map[string]int64{"queue_depth": 7}

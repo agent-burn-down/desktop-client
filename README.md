@@ -140,19 +140,26 @@ Claude Code: will add
   OTEL_METRICS_EXPORTER=otlp
   OTEL_LOGS_EXPORTER=otlp
   OTEL_LOG_TOOL_DETAILS=1
+  OTEL_EXPORTER_OTLP_HEADERS=<redacted>
 Codex: will add
   otel.environment = "control-center"
   otel.metrics_exporter = "none"
   otel.trace_exporter = "none"
   otel.log_user_prompt = false
-  otel.exporter = { otlp-http = { endpoint = "http://127.0.0.1:8765/v1/logs", protocol = "json" } }
+  otel.exporter = { otlp-http = { endpoint = "http://127.0.0.1:8765/v1/logs", protocol = "json", headers = { "X-Burndown-Token" = "<redacted>" } } }
 ...
 Claude Code: backed up to /Users/you/.claude/settings.json.json.bak.20260711-193038
 Claude Code: updated
 Codex: backed up to /Users/you/.codex/config.toml.toml.bak.20260711-193038
 Codex: updated
 Restart Claude Code and Codex so the new OTEL settings take effect.
+If the collector daemon is already running, restart it (`burndown-cli service start`,
+or restart `serve`) so it picks up the new token.
 ```
+
+If the collector is already running as the managed service (`burndown-cli service
+install`), `setup` restarts it for you automatically instead of printing that last
+line.
 
 Use `burndown-cli setup --check` for a dry run that prints pending changes and
 exits non-zero if any are pending. Restart Claude Code and Codex afterward so
@@ -309,6 +316,7 @@ Remove the collector fully in four steps.
    OTEL_METRICS_EXPORTER
    OTEL_LOGS_EXPORTER
    OTEL_LOG_TOOL_DETAILS
+   OTEL_EXPORTER_OTLP_HEADERS
    ```
 
    From `~/.codex/config.toml`, remove these entries from `[otel]`:
