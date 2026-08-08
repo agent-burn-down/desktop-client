@@ -41,6 +41,7 @@ type cacheEntry struct {
 	modTime time.Time
 	cwd     string
 	repo    string
+	repoKey string
 }
 
 type sessionEvent struct {
@@ -97,8 +98,20 @@ func NewWithHomes(codexHome, claudeHome string) *Resolver {
 // Resolve returns the stable repository key for conversationID. Missing,
 // malformed, or unreadable metadata returns "" and never interrupts telemetry.
 func (r *Resolver) Resolve(conversationID string) string {
+	return r.resolveEntry(conversationID).repo
+}
+
+// ResolveKey returns the privacy-safe repo_key counterpart to Resolve,
+// computed from the same cwd resolution and cached in the same entry so
+// calling both for one conversation never re-parses the session file or
+// shells out to git twice.
+func (r *Resolver) ResolveKey(conversationID string) string {
+	return r.resolveEntry(conversationID).repoKey
+}
+
+func (r *Resolver) resolveEntry(conversationID string) cacheEntry {
 	if !validConversationID(conversationID) {
-		return ""
+		return cacheEntry{}
 	}
 
 	r.mu.Lock()
@@ -106,26 +119,27 @@ func (r *Resolver) Resolve(conversationID string) string {
 
 	path := r.findSession(conversationID)
 	if path == "" {
-		return ""
+		return cacheEntry{}
 	}
 
 	info, err := os.Stat(path)
 	if err != nil {
 		delete(r.index, conversationID)
 		delete(r.cache, conversationID)
-		return ""
+		return cacheEntry{}
 	}
 	if cached, ok := r.cache[conversationID]; ok && cached.path == path &&
 		cached.size == info.Size() && cached.modTime.Equal(info.ModTime()) {
-		return cached.repo
+		return cached
 	}
 
 	cwd := readLatestCWD(path, conversationID)
-	repo := canonicalRepo(cwd)
-	r.cache[conversationID] = cacheEntry{
-		path: path, size: info.Size(), modTime: info.ModTime(), repo: repo,
+	entry := cacheEntry{
+		path: path, size: info.Size(), modTime: info.ModTime(),
+		repo: canonicalRepo(cwd), repoKey: RepoKey(cwd),
 	}
-	return repo
+	r.cache[conversationID] = entry
+	return entry
 }
 
 // ResolveClaude returns the stable repository key for a Claude session ID.
@@ -133,8 +147,18 @@ func (r *Resolver) Resolve(conversationID string) string {
 // individual JSONL records. As with Resolve, malformed or unreadable metadata
 // degrades to an empty repository without interrupting telemetry.
 func (r *Resolver) ResolveClaude(sessionID string) string {
+	return r.resolveClaudeEntry(sessionID).repo
+}
+
+// ResolveClaudeKey returns the repo_key counterpart to ResolveClaude; see
+// ResolveKey.
+func (r *Resolver) ResolveClaudeKey(sessionID string) string {
+	return r.resolveClaudeEntry(sessionID).repoKey
+}
+
+func (r *Resolver) resolveClaudeEntry(sessionID string) cacheEntry {
 	if !validConversationID(sessionID) {
-		return ""
+		return cacheEntry{}
 	}
 
 	r.mu.Lock()
@@ -142,26 +166,27 @@ func (r *Resolver) ResolveClaude(sessionID string) string {
 
 	path := r.findClaudeSession(sessionID)
 	if path == "" {
-		return ""
+		return cacheEntry{}
 	}
 	info, err := os.Stat(path)
 	if err != nil {
 		delete(r.claudeIndex, sessionID)
 		delete(r.claudeCache, sessionID)
-		return ""
+		return cacheEntry{}
 	}
 	cached, cachedOK := r.claudeCache[sessionID]
 	if cacheUnchanged(cached, cachedOK, path, info) {
-		return cached.repo
+		return cached
 	}
 
 	cwd, offset := resumePoint(cached, cachedOK, path, info.Size())
 	cwd = readLatestClaudeCWD(path, sessionID, cwd, offset)
-	repo := canonicalRepo(cwd)
-	r.claudeCache[sessionID] = cacheEntry{
-		path: path, size: info.Size(), modTime: info.ModTime(), cwd: cwd, repo: repo,
+	entry := cacheEntry{
+		path: path, size: info.Size(), modTime: info.ModTime(), cwd: cwd,
+		repo: canonicalRepo(cwd), repoKey: RepoKey(cwd),
 	}
-	return repo
+	r.claudeCache[sessionID] = entry
+	return entry
 }
 
 func cacheUnchanged(cached cacheEntry, ok bool, path string, info os.FileInfo) bool {
@@ -325,16 +350,24 @@ func canonicalRepo(cwd string) string {
 	if strings.TrimSpace(cwd) == "" {
 		return ""
 	}
+	return projectLabel(resolvedRepoPath(cwd))
+}
+
+// resolvedRepoPath resolves cwd to the path canonicalRepo derives its label
+// from: the git common (top-level) directory when cwd is inside a git repo,
+// otherwise cwd itself with any known worktree suffix collapsed off. RepoKey
+// reuses this so its tier-2/3 keys are anchored to the same path canonicalRepo
+// already uses, keeping a worktree and its parent -- and any subdirectory of
+// either -- consistent between repo and repo_key.
+func resolvedRepoPath(cwd string) string {
 	path := filepath.Clean(cwd)
 	if info, err := os.Stat(path); err != nil || !info.IsDir() {
 		path = collapseWorktreePath(path)
 	}
-
 	if root := gitCommonRoot(path); root != "" {
-		return projectLabel(root)
+		return root
 	}
-	path = collapseWorktreePath(path)
-	return projectLabel(path)
+	return collapseWorktreePath(path)
 }
 
 func projectLabel(path string) string {
