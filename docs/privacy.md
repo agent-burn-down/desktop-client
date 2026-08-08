@@ -94,7 +94,7 @@ retention window is configurable via `retention_days` in
 
 | Path | Contents | Permissions |
 |------|----------|-------------|
-| `~/.burndown/config.json` | api url, machine, policy, collector key (only when no OS keychain backend is usable) | `0600` |
+| `~/.burndown/config.json` | api url, machine, policy, per-installation receiver token, collector key (only when no OS keychain backend is usable) | `0600` |
 | `~/.burndown/queue.db` | Queued and recently uploaded events | default |
 | `~/.burndown/logs/` | Service stdout and stderr | default |
 

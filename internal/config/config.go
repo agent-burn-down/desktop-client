@@ -46,6 +46,7 @@ var knownFields = map[string]struct{}{
 	"rotation_failures":        {},
 	"auth_reason":              {},
 	"receiver_port":            {},
+	"receiver_token":           {},
 	"inventory_status":         {},
 	"inventory_last_upload_at": {},
 	"inventory_item_count":     {},
@@ -110,6 +111,12 @@ type Config struct {
 	// launchd plist), since that flag is otherwise known only to the running
 	// process's argv.
 	ReceiverPort int `json:"receiver_port,omitempty"`
+	// ReceiverToken is the per-installation shared secret `setup` generates
+	// and writes into the agents' OTEL_EXPORTER_OTLP_HEADERS, and the
+	// receiver validates when present. Empty on installs that have not run
+	// `setup` since this field was introduced; the receiver tolerates that
+	// (see internal/receiver's tolerate-phase token check).
+	ReceiverToken string `json:"receiver_token,omitempty"`
 	// InventoryStatus exposes lifecycle only (disabled, pending, current, or
 	// error); inventory values are never persisted in collector config.
 	InventoryStatus       string `json:"inventory_status,omitempty"`

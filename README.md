@@ -140,12 +140,13 @@ Claude Code: will add
   OTEL_METRICS_EXPORTER=otlp
   OTEL_LOGS_EXPORTER=otlp
   OTEL_LOG_TOOL_DETAILS=1
+  OTEL_EXPORTER_OTLP_HEADERS=<redacted>
 Codex: will add
   otel.environment = "control-center"
   otel.metrics_exporter = "none"
   otel.trace_exporter = "none"
   otel.log_user_prompt = false
-  otel.exporter = { otlp-http = { endpoint = "http://127.0.0.1:8765/v1/logs", protocol = "json" } }
+  otel.exporter = { otlp-http = { endpoint = "http://127.0.0.1:8765/v1/logs", protocol = "json", headers = { "X-Burndown-Token" = "<redacted>" } } }
 ...
 Claude Code: backed up to /Users/you/.claude/settings.json.json.bak.20260711-193038
 Claude Code: updated
@@ -309,6 +310,7 @@ Remove the collector fully in four steps.
    OTEL_METRICS_EXPORTER
    OTEL_LOGS_EXPORTER
    OTEL_LOG_TOOL_DETAILS
+   OTEL_EXPORTER_OTLP_HEADERS
    ```
 
    From `~/.codex/config.toml`, remove these entries from `[otel]`:

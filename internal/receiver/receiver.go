@@ -24,6 +24,10 @@ const (
 	// maxBodyBytes caps a single request body (8 MiB).
 	maxBodyBytes    = 8 * 1024 * 1024
 	readHeaderLimit = 5 * time.Second
+	// TokenHeader carries the per-installation receiver token `setup` writes
+	// into the agents' OTEL_EXPORTER_OTLP_HEADERS. Exported so send-test and
+	// setup's plan output agree on the exact header name with the receiver.
+	TokenHeader = "X-Burndown-Token" //nolint:gosec // this is a header name, not a credential value
 )
 
 // LogHandler consumes a decoded OTLP/HTTP logs payload and reports how many
@@ -47,6 +51,13 @@ type Config struct {
 	Counters CountersFunc
 	// Logger receives recovered handler panics. Defaults to slog.Default().
 	Logger *slog.Logger
+	// Token, if set, is the per-installation secret POST /v1/logs and
+	// /v1/metrics may present via TokenHeader. This is tolerate-phase only: a
+	// request with no token is still accepted (and counted, via /healthz's
+	// "token_missing"); only a token that is present and wrong is rejected.
+	// Empty Token (an install that has not run `setup` since this field was
+	// introduced) accepts every request, matching pre-token behavior.
+	Token string
 }
 
 // Server is the local OTLP/HTTP receiver.
@@ -56,11 +67,13 @@ type Server struct {
 	metricsHandler LogHandler
 	counters       CountersFunc
 	logger         *slog.Logger
+	token          string
 	http           *http.Server
 	ln             net.Listener
 
 	logsReceived    atomic.Int64
 	metricsReceived atomic.Int64
+	tokenMissing    atomic.Int64
 }
 
 // New validates the bind host is loopback and returns a receiver Server.
@@ -86,6 +99,7 @@ func New(cfg Config) (*Server, error) {
 		metricsHandler: cfg.MetricsHandler,
 		counters:       cfg.Counters,
 		logger:         logger,
+		token:          cfg.Token,
 	}
 	s.http = &http.Server{Handler: s, ReadHeaderTimeout: readHeaderLimit}
 	return s, nil
@@ -167,14 +181,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// reject answers and reports true when r fails a cross-origin, host, or
-// content-type guard; ServeHTTP must stop routing when it does.
+// reject answers and reports true when r fails a cross-origin, host,
+// content-type, or token guard; ServeHTTP must stop routing when it does.
 //
 // Only POST bodies (the /v1/logs and /v1/metrics writes) are required to
 // declare Content-Type: application/json — this is what forces a CORS
 // preflight for a browser-driven write, the actual attack surface. GET
-// /healthz carries no body, so requiring a Content-Type on it would only
-// break status/doctor's health probe for no security benefit.
+// /healthz carries no body, so requiring a Content-Type or a token on it
+// would only break status/doctor's health probe for no security benefit.
 func (s *Server) reject(w http.ResponseWriter, r *http.Request) bool {
 	if r.Header.Get("Origin") != "" {
 		writeJSON(w, http.StatusForbidden,
@@ -191,6 +205,26 @@ func (s *Server) reject(w http.ResponseWriter, r *http.Request) bool {
 	if !isJSONContentType(r.Header.Get("Content-Type")) {
 		writeJSON(w, http.StatusUnsupportedMediaType,
 			map[string]any{"error": "unsupported content type"})
+		return true
+	}
+	return s.rejectToken(w, r)
+}
+
+// rejectToken enforces the tolerate-phase per-installation token: a request
+// carrying no token is accepted and counted under /healthz's "token_missing"
+// (the signal that gates a future release enforcing it); a request carrying a
+// token that doesn't match s.token is rejected with 401. It never rejects for
+// an absent token — that is the phase-2 change, deliberately not made here so
+// installs that have not re-run `setup` since the token was introduced don't
+// silently stop reporting.
+func (s *Server) rejectToken(w http.ResponseWriter, r *http.Request) bool {
+	got := r.Header.Get(TokenHeader)
+	if got == "" {
+		s.tokenMissing.Add(1)
+		return false
+	}
+	if got != s.token {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid token"})
 		return true
 	}
 	return false
@@ -258,6 +292,7 @@ func (s *Server) handleHealth(w http.ResponseWriter) {
 	counters := map[string]int64{
 		"logs_received":    s.logsReceived.Load(),
 		"metrics_received": s.metricsReceived.Load(),
+		"token_missing":    s.tokenMissing.Load(),
 	}
 	if s.counters != nil {
 		for k, v := range s.counters() {

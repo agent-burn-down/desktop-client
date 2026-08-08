@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/agent-burn-down/desktop-client/internal/counters"
+	"github.com/agent-burn-down/desktop-client/internal/credstore"
 	"github.com/agent-burn-down/desktop-client/internal/receiver"
 )
 
@@ -55,7 +56,9 @@ func runSendTest(cmd *cobra.Command, port int) error {
 }
 
 // postSyntheticLog posts one clearly-marked synthetic api_request event and
-// returns the receiver's accepted count.
+// returns the receiver's accepted count. It sends the configured receiver
+// token when one exists, so send-test exercises the same authenticated path a
+// real agent does rather than only the tolerate-mode no-token path.
 func postSyntheticLog(ctx context.Context, port int) (int, error) {
 	payload, err := json.Marshal(syntheticLogPayload())
 	if err != nil {
@@ -67,6 +70,9 @@ func postSyntheticLog(ctx context.Context, port int) (int, error) {
 		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if token := receiverToken(); token != "" {
+		req.Header.Set(receiver.TokenHeader, token)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("post synthetic log: %w", err)
@@ -80,6 +86,21 @@ func postSyntheticLog(ctx context.Context, port int) (int, error) {
 		return 0, fmt.Errorf("decode receiver response: %w", err)
 	}
 	return body.Accepted, nil
+}
+
+// receiverToken loads the configured receiver token best-effort: a missing or
+// unreadable config (fresh install, no `setup` yet) is not fatal for
+// send-test, so it just falls back to the tolerate-mode no-token path.
+func receiverToken() string {
+	store, err := credstore.Open()
+	if err != nil {
+		return ""
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		return ""
+	}
+	return cfg.ReceiverToken
 }
 
 // syntheticLogPayload builds a minimal OTLP/HTTP logs batch with one api_request

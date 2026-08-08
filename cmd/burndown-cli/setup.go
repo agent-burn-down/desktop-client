@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/agent-burn-down/desktop-client/internal/credstore"
 	"github.com/agent-burn-down/desktop-client/internal/receiver"
 	"github.com/agent-burn-down/desktop-client/internal/setup"
 )
@@ -87,8 +88,9 @@ type targets struct {
 	claudeDir, codexDir string
 }
 
-// gatherPlans resolves targets, reports detection honestly, and builds each
-// selected agent's plan.
+// gatherPlans resolves targets, reports detection honestly, ensures the
+// per-installation receiver token exists, and builds each selected agent's
+// plan.
 func gatherPlans(cmd *cobra.Command, f *setupFlags) ([]agentPlan, error) {
 	t, err := resolveTargets(f)
 	if err != nil {
@@ -97,7 +99,18 @@ func gatherPlans(cmd *cobra.Command, f *setupFlags) ([]agentPlan, error) {
 	out := cmd.OutOrStdout()
 	reportDetection(out, "Claude Code", t.claudeDir, t.detClaude, t.claude)
 	reportDetection(out, "Codex", t.codexDir, t.detCodex, t.codex)
-	return buildPlans(t, f.port)
+	if !t.claude && !t.codex {
+		return nil, nil
+	}
+	store, err := credstore.Open()
+	if err != nil {
+		return nil, err
+	}
+	token, err := setup.EnsureReceiverToken(store)
+	if err != nil {
+		return nil, err
+	}
+	return buildPlans(t, f.port, token)
 }
 
 // resolveTargets runs detection and applies the force flags to decide which
@@ -129,17 +142,17 @@ func selectAgents(f *setupFlags, detClaude, detCodex bool) (claude, codex bool) 
 }
 
 // buildPlans computes the pending change set for each selected agent.
-func buildPlans(t targets, port int) ([]agentPlan, error) {
+func buildPlans(t targets, port int, token string) ([]agentPlan, error) {
 	var plans []agentPlan
 	if t.claude {
-		p, err := setup.PlanClaude(port)
+		p, err := setup.PlanClaude(port, token)
 		if err != nil {
 			return nil, err
 		}
 		plans = append(plans, agentPlan{name: "Claude Code", plan: p})
 	}
 	if t.codex {
-		p, err := setup.PlanCodex(port)
+		p, err := setup.PlanCodex(port, token)
 		if err != nil {
 			return nil, err
 		}

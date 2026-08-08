@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/agent-burn-down/desktop-client/internal/receiver"
 )
 
 // claudeKeyOrder fixes the order in which required keys are considered so plan
@@ -16,11 +18,18 @@ var claudeKeyOrder = []string{
 	"OTEL_METRICS_EXPORTER",
 	"OTEL_LOGS_EXPORTER",
 	"OTEL_LOG_TOOL_DETAILS",
+	"OTEL_EXPORTER_OTLP_HEADERS",
+}
+
+// claudeSensitiveKeys lists env keys whose Descriptions() line must not reveal
+// the actual value — the per-installation receiver token must never be logged.
+var claudeSensitiveKeys = map[string]bool{
+	"OTEL_EXPORTER_OTLP_HEADERS": true,
 }
 
 // claudeTarget returns the required env values, with the OTLP endpoint bound to
-// the given receiver port.
-func claudeTarget(port int) map[string]string {
+// the given receiver port and the receiver token carried as an OTLP header.
+func claudeTarget(port int, token string) map[string]string {
 	return map[string]string{
 		"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
 		"OTEL_EXPORTER_OTLP_ENDPOINT":  fmt.Sprintf("http://localhost:%d", port),
@@ -28,7 +37,15 @@ func claudeTarget(port int) map[string]string {
 		"OTEL_METRICS_EXPORTER":        "otlp",
 		"OTEL_LOGS_EXPORTER":           "otlp",
 		"OTEL_LOG_TOOL_DETAILS":        "1",
+		"OTEL_EXPORTER_OTLP_HEADERS":   otlpHeaderValue(token),
 	}
+}
+
+// otlpHeaderValue renders token into OTEL_EXPORTER_OTLP_HEADERS' "key=value"
+// format (HTTP header names are case-insensitive, so TokenHeader's exact case
+// doesn't matter to the receiver, only that both sides agree on the name).
+func otlpHeaderValue(token string) string {
+	return fmt.Sprintf("%s=%s", receiver.TokenHeader, token)
 }
 
 // ClaudePlan is the pending change set for Claude Code's settings.json.
@@ -47,21 +64,27 @@ type ClaudePlan struct {
 func (p *ClaudePlan) Empty() bool { return len(p.additions) == 0 }
 
 // Descriptions returns human-readable "KEY=value" lines for the pending
-// additions, in a stable order.
+// additions, in a stable order. A sensitive value (the receiver token) is
+// never shown — it must not be logged.
 func (p *ClaudePlan) Descriptions() []string {
 	out := make([]string, 0, len(p.additions))
 	for _, k := range claudeKeyOrder {
-		if v, ok := p.additions[k]; ok {
-			out = append(out, fmt.Sprintf("%s=%s", k, v))
+		v, ok := p.additions[k]
+		if !ok {
+			continue
 		}
+		if claudeSensitiveKeys[k] {
+			v = "<redacted>"
+		}
+		out = append(out, fmt.Sprintf("%s=%s", k, v))
 	}
 	return out
 }
 
 // PlanClaude computes the pending settings.json changes for the given receiver
-// port. It refuses (returns an error) when the file's env field exists but is
-// not a JSON object, and when the file is not valid JSON.
-func PlanClaude(port int) (*ClaudePlan, error) {
+// port and receiver token. It refuses (returns an error) when the file's env
+// field exists but is not a JSON object, and when the file is not valid JSON.
+func PlanClaude(port int, token string) (*ClaudePlan, error) {
 	dir, err := ClaudeDir()
 	if err != nil {
 		return nil, err
@@ -71,7 +94,7 @@ func PlanClaude(port int) (*ClaudePlan, error) {
 	if err != nil {
 		return nil, err
 	}
-	target := claudeTarget(port)
+	target := claudeTarget(port, token)
 	additions := make(map[string]string)
 	for _, k := range claudeKeyOrder {
 		if _, present := env[k]; !present {

@@ -6,16 +6,20 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/agent-burn-down/desktop-client/internal/config"
 	"github.com/agent-burn-down/desktop-client/internal/setup"
 )
 
-// setupDirs points both agent config directories at fresh temp dirs.
+// setupDirs points both agent config directories, and the collector config
+// directory (which now holds the generated receiver token), at fresh temp
+// dirs so tests never touch the developer's real ~/.burndown.
 func setupDirs(t *testing.T) (claudeDir, codexDir string) {
 	t.Helper()
 	claudeDir = t.TempDir()
 	codexDir = t.TempDir()
 	t.Setenv(setup.EnvClaudeDir, claudeDir)
 	t.Setenv(setup.EnvCodexDir, codexDir)
+	t.Setenv(config.EnvConfigDir, t.TempDir())
 	return claudeDir, codexDir
 }
 
@@ -65,6 +69,7 @@ func TestSetupNotDetectedIsHonest(t *testing.T) {
 	// Non-existent dirs and empty PATH: neither agent is detected.
 	t.Setenv(setup.EnvClaudeDir, filepath.Join(t.TempDir(), "nope"))
 	t.Setenv(setup.EnvCodexDir, filepath.Join(t.TempDir(), "nope"))
+	t.Setenv(config.EnvConfigDir, t.TempDir())
 	t.Setenv("PATH", "")
 
 	out, err := runCmd(t, "setup", "--check")

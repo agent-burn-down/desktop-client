@@ -18,7 +18,11 @@ flowchart LR
 
 **receiver** — binds `127.0.0.1:8765` and accepts OTLP/HTTP log batches at
 `/v1/logs`. It refuses to bind any non-loopback address, so telemetry never
-leaves the machine unencrypted or reaches the network.
+leaves the machine unencrypted or reaches the network. `setup` also writes a
+random per-installation token into the agents' `OTEL_EXPORTER_OTLP_HEADERS`;
+the receiver validates it when present but currently still accepts a request
+with no token (tolerate phase), counting it under `/healthz`'s
+`token_missing` so a future release can safely start requiring it.
 
 **normalize** — flattens each OTLP log record into a `NormalizedEvent` built from
 a fixed metadata allowlist (see [Privacy](privacy.md)). Records without a usable

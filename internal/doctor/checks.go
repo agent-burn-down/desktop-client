@@ -266,10 +266,20 @@ func (d *Doctor) checkService() Result {
 // checkAgents inspects Claude Code and Codex OTEL configuration, reusing the
 // setup planner. A detected-but-misconfigured agent fails; no agent detected
 // warns; correctly configured agents pass.
-func checkAgents(port int) Result {
+//
+// token is the persisted receiver token (empty when no config exists yet, or
+// on an install that hasn't run `setup` since it was introduced). Codex's
+// exporter is a single composite value compared verbatim, so this must be the
+// real configured token or a correctly-configured Codex would be misreported
+// as pending a change on every doctor run.
+func checkAgents(port int, cfg *config.Config, cfgErr error) Result {
+	var token string
+	if cfgErr == nil {
+		token = cfg.ReceiverToken
+	}
 	inspected := []agentCheck{
-		inspectAgent("Claude Code", setup.DetectClaude, planClaude(port)),
-		inspectAgent("Codex", setup.DetectCodex, planCodex(port)),
+		inspectAgent("Claude Code", setup.DetectClaude, planClaude(port, token)),
+		inspectAgent("Codex", setup.DetectCodex, planCodex(port, token)),
 	}
 	var misconfig, configured []string
 	anyDetected := false
@@ -306,12 +316,12 @@ type agentCheck struct {
 	problem  string
 }
 
-func planClaude(port int) func() (emptier, error) {
-	return func() (emptier, error) { return setup.PlanClaude(port) }
+func planClaude(port int, token string) func() (emptier, error) {
+	return func() (emptier, error) { return setup.PlanClaude(port, token) }
 }
 
-func planCodex(port int) func() (emptier, error) {
-	return func() (emptier, error) { return setup.PlanCodex(port) }
+func planCodex(port int, token string) func() (emptier, error) {
+	return func() (emptier, error) { return setup.PlanCodex(port, token) }
 }
 
 // inspectAgent detects an agent and, when present, computes whether its OTEL

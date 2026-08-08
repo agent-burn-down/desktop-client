@@ -9,6 +9,9 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+// testCodexToken is the receiver token used by codex_test.go's PlanCodex calls.
+const testCodexToken = "codex-test-token"
+
 // assertValidTOML parses text and fails if it is not valid TOML, returning the
 // decoded document for further assertions.
 func assertValidTOML(t *testing.T, text string) map[string]any {
@@ -36,7 +39,7 @@ func TestPlanCodexFreshCreatesTable(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv(EnvCodexDir, dir)
 
-	plan, err := PlanCodex(8765)
+	plan, err := PlanCodex(8765, testCodexToken)
 	if err != nil {
 		t.Fatalf("PlanCodex: %v", err)
 	}
@@ -57,7 +60,8 @@ func TestPlanCodexFreshCreatesTable(t *testing.T) {
 		`metrics_exporter = "none"`,
 		`trace_exporter = "none"`,
 		"log_user_prompt = false",
-		`exporter = { otlp-http = { endpoint = "http://127.0.0.1:8765/v1/logs", protocol = "json" } }`,
+		`exporter = { otlp-http = { endpoint = "http://127.0.0.1:8765/v1/logs", protocol = "json", ` +
+			`headers = { "X-Burndown-Token" = "codex-test-token" } } }`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("config.toml missing %q\n---\n%s", want, got)
@@ -79,7 +83,7 @@ func TestPlanCodexPreservesExistingOtel(t *testing.T) {
 	if err := os.WriteFile(path, []byte(existing), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	plan, err := PlanCodex(8765)
+	plan, err := PlanCodex(8765, testCodexToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +124,7 @@ func TestPlanCodexRemovesStaleExporterTables(t *testing.T) {
 	if err := os.WriteFile(path, []byte(existing), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	plan, err := PlanCodex(8765)
+	plan, err := PlanCodex(8765, testCodexToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +139,8 @@ func TestPlanCodexRemovesStaleExporterTables(t *testing.T) {
 		t.Errorf("stale nested exporter table not removed:\n%s", got)
 	}
 	if !strings.Contains(got,
-		`exporter = { otlp-http = { endpoint = "http://127.0.0.1:8765/v1/logs", protocol = "json" } }`) {
+		`exporter = { otlp-http = { endpoint = "http://127.0.0.1:8765/v1/logs", protocol = "json", `+
+			`headers = { "X-Burndown-Token" = "codex-test-token" } } }`) {
 		t.Errorf("inline exporter not inserted:\n%s", got)
 	}
 }
@@ -153,7 +158,7 @@ func TestPlanCodexReplacesDifferingExporter(t *testing.T) {
 	if err := os.WriteFile(path, []byte(existing), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	plan, err := PlanCodex(8765)
+	plan, err := PlanCodex(8765, testCodexToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,12 +177,35 @@ func TestPlanCodexReplacesDifferingExporter(t *testing.T) {
 	}
 }
 
+// TestCodexDescriptionsNeverLeakToken proves the printed plan never contains
+// the raw receiver token, even though the written file does.
+func TestCodexDescriptionsNeverLeakToken(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(EnvCodexDir, dir)
+	plan, err := PlanCodex(8765, testCodexToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range plan.Descriptions() {
+		if strings.Contains(line, testCodexToken) {
+			t.Fatalf("plan description leaked the token: %q", line)
+		}
+	}
+	if _, err := plan.Apply(); err != nil {
+		t.Fatal(err)
+	}
+	got := readFile(t, filepath.Join(dir, "config.toml"))
+	if !strings.Contains(got, testCodexToken) {
+		t.Fatal("applied config.toml should contain the real token")
+	}
+}
+
 func TestCodexSecondRunNoOp(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv(EnvCodexDir, dir)
 	path := filepath.Join(dir, "config.toml")
 
-	first, err := PlanCodex(8765)
+	first, err := PlanCodex(8765, testCodexToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +215,7 @@ func TestCodexSecondRunNoOp(t *testing.T) {
 	afterFirst := readFile(t, path)
 	backupsBefore := countBackups(t, dir, ".toml.bak.")
 
-	second, err := PlanCodex(8765)
+	second, err := PlanCodex(8765, testCodexToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +238,7 @@ func TestCodexBackupMatchesOriginal(t *testing.T) {
 	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	plan, err := PlanCodex(8765)
+	plan, err := PlanCodex(8765, testCodexToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +310,7 @@ func TestEnsureTableKeyIdempotent(t *testing.T) {
 func applyCodex(t *testing.T, dir string) string {
 	t.Helper()
 	t.Setenv(EnvCodexDir, dir)
-	plan, err := PlanCodex(8765)
+	plan, err := PlanCodex(8765, testCodexToken)
 	if err != nil {
 		t.Fatalf("PlanCodex: %v", err)
 	}
@@ -323,7 +351,7 @@ func TestPlanCodexMultiLineArrayNotCorrupted(t *testing.T) {
 	}
 
 	// Second run must be a byte-identical no-op.
-	plan2, err := PlanCodex(8765)
+	plan2, err := PlanCodex(8765, testCodexToken)
 	if err != nil {
 		t.Fatalf("second PlanCodex: %v", err)
 	}
@@ -408,7 +436,7 @@ func TestPlanCodexRemovesStaleTableRegardlessOfQuoting(t *testing.T) {
 }
 
 func TestVerifyCodexEditRejectsDuplicateKeys(t *testing.T) {
-	if err := verifyCodexEdit("[otel]\nx = 1\nx = 2\n", 8765, nil); err == nil {
+	if err := verifyCodexEdit("[otel]\nx = 1\nx = 2\n", 8765, testCodexToken, nil); err == nil {
 		t.Error("expected duplicate-key rejection (invalid TOML)")
 	}
 }
@@ -416,8 +444,9 @@ func TestVerifyCodexEditRejectsDuplicateKeys(t *testing.T) {
 func TestVerifyCodexEditAcceptsCorrectPlacement(t *testing.T) {
 	text := "[otel]\n" +
 		"environment = \"control-center\"\n" +
-		`exporter = { otlp-http = { endpoint = "http://127.0.0.1:8765/v1/logs", protocol = "json" } }` + "\n"
-	if err := verifyCodexEdit(text, 8765, map[string]any{"environment": "control-center"}); err != nil {
+		`exporter = { otlp-http = { endpoint = "http://127.0.0.1:8765/v1/logs", protocol = "json", ` +
+		`headers = { "X-Burndown-Token" = "codex-test-token" } } }` + "\n"
+	if err := verifyCodexEdit(text, 8765, testCodexToken, map[string]any{"environment": "control-center"}); err != nil {
 		t.Errorf("correctly-placed edit rejected: %v", err)
 	}
 }
@@ -428,13 +457,13 @@ func TestVerifyCodexEditRejectsMisplacedKey(t *testing.T) {
 		`exporter = { otlp-http = { endpoint = "http://127.0.0.1:8765/v1/logs", protocol = "json" } }` + "\n" +
 		"[other]\n" +
 		"environment = \"control-center\"\n"
-	if err := verifyCodexEdit(text, 8765, map[string]any{"environment": "control-center"}); err == nil {
+	if err := verifyCodexEdit(text, 8765, testCodexToken, map[string]any{"environment": "control-center"}); err == nil {
 		t.Error("expected refusal when an inserted key landed outside [otel]")
 	}
 }
 
 func TestVerifyCodexEditRejectsMissingExporter(t *testing.T) {
-	if err := verifyCodexEdit("[otel]\nenvironment = \"control-center\"\n", 8765, nil); err == nil {
+	if err := verifyCodexEdit("[otel]\nenvironment = \"control-center\"\n", 8765, testCodexToken, nil); err == nil {
 		t.Error("expected refusal when the exporter is absent")
 	}
 }
@@ -457,7 +486,7 @@ func TestPlanCodexTripleQuotedStringNoSilentMisplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := PlanCodex(8765)
+	plan, err := PlanCodex(8765, testCodexToken)
 	if err != nil {
 		// Clean refusal: the file must be left exactly as it was.
 		if got := readFile(t, path); got != existing {

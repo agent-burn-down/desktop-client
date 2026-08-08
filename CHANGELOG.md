@@ -4,6 +4,16 @@ All notable changes to `burndown-cli` are documented here.
 
 ## [Unreleased]
 
+### Security
+
+- `setup` now generates a random per-installation token and writes it into the
+  agents' `OTEL_EXPORTER_OTLP_HEADERS`. The receiver validates it when
+  present and rejects a wrong token with 401, but still accepts a request
+  with no token — a tolerate phase so existing installs don't stop reporting
+  until they re-run `setup`. `/healthz`'s new `token_missing` counter tracks
+  how many requests are still arriving without one, gating a future release
+  that requires it (#69, follow-up to #66).
+
 ## [0.8.0] - 2026-08-05
 
 ### Security
