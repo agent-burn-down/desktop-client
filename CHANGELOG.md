@@ -4,6 +4,17 @@ All notable changes to `burndown-cli` are documented here.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-08
+
+### Added
+
+- Groundwork for stable repository identity: the resolver now derives a
+  privacy-safe `repo_key` (normalized git remote, or a salted hash for
+  directories without one) alongside the existing `repo` label. Nothing is
+  transmitted yet — the field goes on the wire in a later release (#76). The
+  hash salt persists at the config directory as `repo_key_salt`; deleting it
+  would change the identity of non-git projects (#75).
+
 ### Changed
 
 - `login` is now device-flow only. The `--key` flag and the piped-stdin key
