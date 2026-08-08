@@ -4,6 +4,17 @@ All notable changes to `burndown-cli` are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- `login` is now device-flow only. The `--key` flag and the piped-stdin key
+  fallback are removed — the dashboard no longer mints pasteable collector
+  keys, so there is no longer a source for either. The `--email` flag and the
+  interactive email prompt are also removed: the reporting email is resolved
+  server-side from the device-issued key's owner and returned in the device
+  token response. A server response missing the email (an API that hasn't
+  deployed the field yet) fails `login` with an actionable error rather than
+  prompting (#77).
+
 ### Security
 
 - `setup` now generates a random per-installation token and writes it into the

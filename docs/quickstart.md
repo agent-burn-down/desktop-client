@@ -21,39 +21,46 @@ make build
 cp bin/burndown-cli /usr/local/bin/
 ```
 
-## 1. Get a collector key
+## 1. Have an account
 
-Sign in to [app.agentburndown.com](https://app.agentburndown.com) and create a
-collector key. It looks like `abd_...`.
+Sign up or sign in at [app.agentburndown.com](https://app.agentburndown.com).
+`login` (next step) issues the collector key for you — there's no key to
+create or copy first.
 
 ## 2. Log in
 
-`login` validates the key by registering this machine with the backend, then
-stores the credentials in `~/.burndown/config.json` (file mode `0600`, directory
-`0700`). With no `--key` flag the key is read from a hidden prompt; the reporting
-email is prompted too.
+`login` pairs this machine with your account via a short device code: it
+opens a browser to approve the request, then registers the machine and
+stores the credentials in `~/.burndown/config.json` (file mode `0600`,
+directory `0700`). The reporting email isn't entered locally — the backend
+resolves it from the collector key it issues.
 
 ```
 burndown-cli login
 ```
 
 ```
-Reporting user email: you@example.com
-Collector key (abd_...):
+To finish logging in, visit:
+
+    https://app.agentburndown.com/activate
+
+And enter code: ABCD-1234
+
+Waiting for approval...
 Logged in. key abd_a1b2c3d4… collector_id 1 machine your-hostname
 ```
 
-Pass values as flags to skip the prompts (useful for CI, where the key can also
-be piped on stdin):
+On a headless machine, or if a browser can't be opened automatically, visit
+the printed URL from any other device to approve.
 
 ```
-burndown-cli login --email you@example.com --key abd_... --machine your-hostname
+burndown-cli login --machine your-hostname
 ```
 
 The collector backend is fixed to the production
 `https://collector.agentburndown.com` endpoint; installation and login do not
 accept a backend URL. If your key ever changes, run `login` again; use
-`register` to refresh the collector id and policy without re-entering the key.
+`register` to refresh the collector id and policy without re-pairing.
 
 Clients upgrading from a release that used `https://app.agentburndown.com` as
 the default automatically migrate that exact stored URL to the dedicated
