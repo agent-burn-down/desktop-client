@@ -440,6 +440,34 @@ func TestWrongTokenSameLengthRejected(t *testing.T) {
 	}
 }
 
+// TestEmptyConfiguredTokenToleratesAnyPresentedToken is the case
+// TestPreTokenInstallKeepsReporting doesn't cover: the daemon has no token
+// loaded (s.token == ""; a pre-token config, or `setup` generated a token
+// after this `serve` process already started and hasn't been restarted), and
+// the request *does* carry a token — because the agent was reconfigured by a
+// `setup` run the daemon doesn't know about yet. This must still be accepted,
+// not 401: the receiver has nothing to validate the presented token against,
+// and rejecting here would 401 real telemetry the moment an operator does the
+// right thing and reruns `setup`, which is exactly what tolerate-phase exists
+// to prevent.
+func TestEmptyConfiguredTokenToleratesAnyPresentedToken(t *testing.T) {
+	called := false
+	s := startTest(t, Config{Handler: func(map[string]any) (int, int) {
+		called = true
+		return 1, 0
+	}})
+	status, body := postWithToken(t, s, "/v1/logs", "some-token-the-daemon-has-never-heard-of")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %v", status, body)
+	}
+	if !called {
+		t.Fatal("handler was not invoked")
+	}
+	if body["accepted"].(float64) != 1 {
+		t.Fatalf("accepted = %v, want 1", body["accepted"])
+	}
+}
+
 // TestPreTokenInstallKeepsReporting is the regression that matters most: an
 // install with no token in its config (never re-run `setup` since the token
 // was introduced) and agents that send no token header must keep reporting,

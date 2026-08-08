@@ -107,7 +107,10 @@ Useful flags:
 - `--port <port>` — point agents at a non-default receiver port.
 - `--yes` — skip the confirmation prompt.
 
-Restart Claude Code and Codex afterward so they pick up the new settings.
+Restart Claude Code and Codex afterward so they pick up the new settings. If the
+collector daemon is already running as the managed service, `setup` restarts it
+automatically so it picks up the new token; otherwise it prints a reminder to
+restart it yourself.
 
 ## 4. Install the background service
 

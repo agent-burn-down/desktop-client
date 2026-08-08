@@ -153,7 +153,13 @@ Claude Code: updated
 Codex: backed up to /Users/you/.codex/config.toml.toml.bak.20260711-193038
 Codex: updated
 Restart Claude Code and Codex so the new OTEL settings take effect.
+If the collector daemon is already running, restart it (`burndown-cli service start`,
+or restart `serve`) so it picks up the new token.
 ```
+
+If the collector is already running as the managed service (`burndown-cli service
+install`), `setup` restarts it for you automatically instead of printing that last
+line.
 
 Use `burndown-cli setup --check` for a dry run that prints pending changes and
 exits non-zero if any are pending. Restart Claude Code and Codex afterward so

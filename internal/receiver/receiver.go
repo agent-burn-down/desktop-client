@@ -219,13 +219,22 @@ func (s *Server) reject(w http.ResponseWriter, r *http.Request) bool {
 // installs that have not re-run `setup` since the token was introduced don't
 // silently stop reporting.
 //
+// s.token == "" also tolerates unconditionally, including a request that
+// *does* carry a token: the daemon has no token loaded yet (a pre-token
+// config, or `setup` generated one after this `serve` process already
+// started and hasn't been restarted), so there is nothing to validate
+// against. Rejecting here would 401 the exact requests tolerate-phase exists
+// to keep accepted, the moment an operator does the right thing and reruns
+// `setup`. Counted under "token_missing" too — from the daemon's point of
+// view it's the same "can't verify a token yet" state.
+//
 // The attacker this token defends against is any other local process on the
 // same workstation — exactly the position to run a timing oracle against a
 // loopback endpoint (no network jitter, unlimited requests). The comparison
 // must run in constant time; subtle.ConstantTimeCompare, not ==.
 func (s *Server) rejectToken(w http.ResponseWriter, r *http.Request) bool {
 	got := r.Header.Get(TokenHeader)
-	if got == "" {
+	if got == "" || s.token == "" {
 		s.tokenMissing.Add(1)
 		return false
 	}
