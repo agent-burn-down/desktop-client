@@ -38,9 +38,8 @@ burndown-cli serve --port <port>
 
 ## Key rejected
 
-`login` reports `collector key rejected`. The key is wrong or has been revoked.
-Get a fresh key from [app.agentburndown.com](https://app.agentburndown.com) and
-run `burndown-cli login` again.
+`login` reports `collector key rejected`. The device-issued key was revoked or
+expired before registration completed; run `burndown-cli login` again.
 
 ## Agent not detected
 

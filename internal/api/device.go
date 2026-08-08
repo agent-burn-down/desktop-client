@@ -32,10 +32,13 @@ type DeviceAuth struct {
 // been approved. CollectorKey is returned exactly once by the backend. A
 // device-issued key always carries a fresh expiry (never nullable, unlike the
 // register/heartbeat key_expires_at, which can be null for legacy keys).
+// UserEmail is the canonical email of the key's owner, resolved server-side;
+// the CLI has no other source of the reporting email.
 type DeviceToken struct {
 	CollectorKey string `json:"collector_key"`
 	KeyID        int64  `json:"key_id"`
 	KeyExpiresAt string `json:"key_expires_at"`
+	UserEmail    string `json:"user_email"`
 }
 
 // DeviceTokenError is returned while polling POST /api/device/token before it

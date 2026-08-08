@@ -92,32 +92,37 @@ burndown-cli --version
 
 A fresh machine goes from nothing to a running collector in five steps.
 
-### 1. Get a collector key
+### 1. Have an account
 
-Sign in to [app.agentburndown.com](https://app.agentburndown.com) and create a
-collector key. It looks like `abd_...`.
+Sign up or sign in at [app.agentburndown.com](https://app.agentburndown.com).
+`login` (next step) issues the collector key for you — there's no key to
+create or copy first.
 
 ### 2. Log in
 
-`login` validates the key by registering this machine with the backend, then
-stores the credentials in `~/.burndown/config.json` (file mode `0600`). With no
-`--key` flag the key is read from a hidden prompt.
+`login` pairs this machine with your account via a short device code: it
+opens a browser to approve the request, then registers the machine and
+stores the credentials in `~/.burndown/config.json` (file mode `0600`). The
+reporting email isn't entered locally — the backend resolves it from the
+collector key it issues.
 
 ```
 burndown-cli login
 ```
 
 ```
-Reporting user email: you@example.com
-Collector key (abd_...):
+To finish logging in, visit:
+
+    https://app.agentburndown.com/activate
+
+And enter code: ABCD-1234
+
+Waiting for approval...
 Logged in. key abd_a1b2c3d4… collector_id 1 machine your-hostname
 ```
 
-You can pass the values as flags instead of being prompted:
-
-```
-burndown-cli login --email you@example.com --key abd_...
-```
+On a headless machine, or if a browser can't be opened automatically, visit
+the printed URL from any other device to approve.
 
 ### 3. Configure your agents
 
@@ -360,8 +365,9 @@ Find it with `lsof -iTCP:8765 -sTCP:LISTEN`, or run the collector on another por
 and point setup at it: `burndown-cli setup --port <port>` and
 `burndown-cli serve --port <port>`.
 
-**Key rejected.** `login` reports `collector key rejected`. The key is wrong or
-revoked. Get a fresh key from the dashboard and run `burndown-cli login` again.
+**Key rejected.** `login` reports `collector key rejected`. The device-issued
+key was revoked or expired before registration completed; run
+`burndown-cli login` again.
 
 **Agent not detected.** `setup` skips an agent it does not detect. Force it with
 `burndown-cli setup --claude`, `burndown-cli setup --codex`, or

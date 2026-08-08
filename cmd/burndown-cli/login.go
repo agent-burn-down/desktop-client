@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 
 	"github.com/agent-burn-down/desktop-client/internal/api"
 	"github.com/agent-burn-down/desktop-client/internal/config"
@@ -43,100 +42,40 @@ var devicePollSleep func(time.Duration)
 // httptest server. Production builds never expose an endpoint override.
 var loginAPIURL = config.DefaultAPIURL
 
-// newLoginCmd builds the `login` command: pair via the device-code flow by
-// default, falling back to a pasted/piped collector key for headless/CI use.
+// newLoginCmd builds the `login` command: pair via the RFC-8628-style
+// device-code flow. It is the only login path — the dashboard no longer
+// mints pasteable collector keys, and the reporting email is resolved
+// server-side from the key's owner, not entered locally.
 func newLoginCmd() *cobra.Command {
-	var key, machine, email string
-	var device bool
+	var machine string
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Pair this machine with your Agent Burndown account",
-		Long: "Pair this machine with your Agent Burndown account. On an interactive\n" +
-			"terminal, opens a browser to approve a short device code by default.\n" +
-			"For headless/CI use, pass --key (a collector key from your dashboard)\n" +
-			"or pipe it via stdin.",
+		Long: "Pair this machine with your Agent Burndown account: opens a browser\n" +
+			"to approve a short device code. On a headless machine, the URL and\n" +
+			"code are printed so you can approve from any other device.",
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runLogin(cmd, loginInput{
-				key: key, machine: machine, email: email, apiURL: loginAPIURL, device: device,
-			})
+			return runLogin(cmd, loginInput{machine: machine, apiURL: loginAPIURL})
 		},
 	}
-	cmd.Flags().StringVar(&key, "key", "", "collector key (abd_...); use for headless/CI login")
 	cmd.Flags().StringVar(&machine, "machine", "", "machine name (default: hostname)")
-	cmd.Flags().StringVar(&email, "email", "", "reporting user email; prompted if omitted")
-	cmd.Flags().BoolVar(&device, "device", false,
-		"force the device-code flow even if stdin is not a terminal")
 	return cmd
 }
 
 type loginInput struct {
-	key, machine, email, apiURL string
-	device                      bool
+	machine, apiURL string
 }
 
-// runLogin dispatches to the device-code flow (the default on an interactive
-// terminal) or the paste/pipe-key flow (--key, --device forcing the other way
-// is an error, or a non-terminal stdin for headless/CI).
+// runLogin runs the device-authorization flow: request a grant, print/open
+// the approval URL, poll for approval, then register with the issued key.
+// Ctrl-C is safe at any point — nothing is persisted until every step
+// succeeds.
 func runLogin(cmd *cobra.Command, in loginInput) error {
-	if in.key != "" && in.device {
-		return errors.New("--key and --device are mutually exclusive")
-	}
-	if in.device || (in.key == "" && isTerminalStdin(cmd)) {
-		return runDeviceLogin(cmd, in)
-	}
-	return runPasteKeyLogin(cmd, in)
-}
-
-// runPasteKeyLogin resolves inputs, validates the key against the backend, and
-// persists the resulting credentials and policy. This is the pre-device-flow
-// behavior, unchanged: --key explicitly, or a key piped via stdin for CI.
-func runPasteKeyLogin(cmd *cobra.Command, in loginInput) error {
-	p := &prompter{cmd: cmd}
-	email, err := resolveEmail(p, in.email)
-	if err != nil {
-		return err
-	}
-	machine, err := resolveMachine(in.machine)
-	if err != nil {
-		return err
-	}
-	key, err := resolveKey(p, in.key)
-	if err != nil {
-		return err
-	}
-	client := api.NewClient(in.apiURL, key)
-	out, err := client.Register(cmd.Context(), machine, email)
-	if err != nil {
-		return loginError(err)
-	}
-	store, err := credstore.Open()
-	if err != nil {
-		return err
-	}
-	if err := persistLogin(store, in.apiURL, key, email, machine, out); err != nil {
-		return err
-	}
-	outf(cmd.OutOrStdout(),
-		"Logged in. key %s… collector_id %d machine %s\n",
-		keyPrefix(key), out.CollectorID, machine)
-	return nil
-}
-
-// runDeviceLogin runs the RFC-8628-style device-authorization flow: request a
-// grant, print/open the approval URL, poll for approval, then register with
-// the issued key. Ctrl-C is safe at any point — nothing is persisted until
-// every step succeeds.
-func runDeviceLogin(cmd *cobra.Command, in loginInput) error {
 	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	p := &prompter{cmd: cmd}
-	email, err := resolveEmail(p, in.email)
-	if err != nil {
-		return err
-	}
 	machine, err := resolveMachine(in.machine)
 	if err != nil {
 		return err
@@ -153,7 +92,7 @@ func runDeviceLogin(cmd *cobra.Command, in loginInput) error {
 	if err != nil {
 		return err
 	}
-	return finishDeviceLogin(cmd, ctx, in, dt, email, machine)
+	return finishDeviceLogin(cmd, ctx, in, dt, machine)
 }
 
 // announceDeviceGrant prints the verification URL/code (always visible,
@@ -168,13 +107,18 @@ func announceDeviceGrant(cmd *cobra.Command, da *api.DeviceAuth) {
 }
 
 // finishDeviceLogin registers this machine with the issued key and persists
-// credentials. Nothing is written before this succeeds in full.
+// credentials, including the reporting email the server resolved for the
+// key's owner. Nothing is written before this succeeds in full.
 func finishDeviceLogin(
-	cmd *cobra.Command, ctx context.Context, in loginInput,
-	dt *api.DeviceToken, email, machine string,
+	cmd *cobra.Command, ctx context.Context, in loginInput, dt *api.DeviceToken, machine string,
 ) error {
+	if dt.UserEmail == "" {
+		return errors.New(
+			"server did not return a reporting email with this device login; " +
+				"the API may not have deployed yet, try again shortly")
+	}
 	authed := api.NewClient(in.apiURL, dt.CollectorKey)
-	out, err := authed.Register(ctx, machine, email)
+	out, err := authed.Register(ctx, machine, dt.UserEmail)
 	if err != nil {
 		return loginError(err)
 	}
@@ -182,7 +126,7 @@ func finishDeviceLogin(
 	if err != nil {
 		return err
 	}
-	if err := persistLogin(store, in.apiURL, dt.CollectorKey, email, machine, out); err != nil {
+	if err := persistLogin(store, in.apiURL, dt.CollectorKey, dt.UserEmail, machine, out); err != nil {
 		return err
 	}
 	outf(cmd.OutOrStdout(),
@@ -262,13 +206,6 @@ func deviceTokenOutcome(
 	default: // authorization_pending, or an unrecognized future code
 		return interval, nil, true
 	}
-}
-
-// isTerminalStdin reports whether cmd's stdin is an interactive terminal
-// (vs. piped/redirected input, the headless/CI case).
-func isTerminalStdin(cmd *cobra.Command) bool {
-	f, ok := cmd.InOrStdin().(*os.File)
-	return ok && term.IsTerminal(int(f.Fd()))
 }
 
 // newRegisterCmd builds the `register` command: re-register this machine using
@@ -370,20 +307,6 @@ func loginError(err error) error {
 	return err
 }
 
-func resolveEmail(p *prompter, flag string) (string, error) {
-	if flag != "" {
-		return flag, nil
-	}
-	email, err := p.line("Reporting user email: ")
-	if err != nil {
-		return "", err
-	}
-	if email == "" {
-		return "", errors.New("a reporting user email is required")
-	}
-	return email, nil
-}
-
 func resolveMachine(flag string) (string, error) {
 	if flag != "" {
 		return flag, nil
@@ -395,20 +318,6 @@ func resolveMachine(flag string) (string, error) {
 	return host, nil
 }
 
-func resolveKey(p *prompter, flag string) (string, error) {
-	if flag != "" {
-		return flag, nil
-	}
-	key, err := p.secret("Collector key (abd_...): ")
-	if err != nil {
-		return "", err
-	}
-	if key == "" {
-		return "", errors.New("a collector key is required")
-	}
-	return key, nil
-}
-
 // keyPrefix returns the displayable prefix (first keyPrefixLen chars) of a
 // collector key, never the full secret.
 func keyPrefix(key string) string {
@@ -418,9 +327,7 @@ func keyPrefix(key string) string {
 	return key[:keyPrefixLen]
 }
 
-// prompter reads interactive input from a command's stdin, using hidden input
-// for secrets when stdin is a terminal and plain line reads otherwise (so CI
-// can pipe values in).
+// prompter reads a line of interactive input from a command's stdin.
 type prompter struct {
 	cmd *cobra.Command
 	br  *bufio.Reader
@@ -440,18 +347,4 @@ func (p *prompter) line(label string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(line), nil
-}
-
-func (p *prompter) secret(label string) (string, error) {
-	if isTerminalStdin(p.cmd) {
-		f, _ := p.cmd.InOrStdin().(*os.File)
-		outf(p.cmd.ErrOrStderr(), "%s", label)
-		b, err := term.ReadPassword(int(f.Fd()))
-		outln(p.cmd.ErrOrStderr())
-		if err != nil {
-			return "", err
-		}
-		return strings.TrimSpace(string(b)), nil
-	}
-	return p.line(label)
 }

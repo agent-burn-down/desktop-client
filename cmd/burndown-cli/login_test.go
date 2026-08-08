@@ -67,89 +67,15 @@ func TestLoginDefaultsToCollectorEndpoint(t *testing.T) {
 	}
 }
 
-func TestLoginPersistsCredentialsPrefixOnly(t *testing.T) {
-	t.Setenv(config.EnvConfigDir, t.TempDir())
-	srv := fakeBackend(t)
-	defer srv.Close()
-	useLoginAPIURL(t, srv.URL)
-
-	out, err := runCmd(t,
-		"login", "--key", testKey, "--email", "dev@example.com",
-		"--machine", "laptop-1")
-	if err != nil {
-		t.Fatalf("login: %v", err)
-	}
-	if strings.Contains(out, testKey) {
-		t.Errorf("full key leaked in output: %q", out)
-	}
-	if !strings.Contains(out, keyPrefix(testKey)) {
-		t.Errorf("key prefix missing from output: %q", out)
-	}
-
-	store, _ := config.NewFileStore()
-	cfg, err := store.Load()
-	if err != nil {
-		t.Fatalf("load persisted config: %v", err)
-	}
-	if cfg.CollectorKey != testKey {
-		t.Errorf("collector_key = %q, want %q", cfg.CollectorKey, testKey)
-	}
-	if cfg.CollectorID != 123 {
-		t.Errorf("collector_id = %d, want 123", cfg.CollectorID)
-	}
-	if cfg.UserEmail != "dev@example.com" || cfg.Machine != "laptop-1" {
-		t.Errorf("identity not persisted: %+v", cfg)
-	}
-	if cfg.Policy.MaxBatchSize != 500 {
-		t.Errorf("policy not persisted: %+v", cfg.Policy)
-	}
-}
-
-func TestLoginBadKeyExitsWithMessage(t *testing.T) {
-	t.Setenv(config.EnvConfigDir, t.TempDir())
-	srv := fakeBackend(t)
-	defer srv.Close()
-	useLoginAPIURL(t, srv.URL)
-
-	_, err := runCmd(t,
-		"login", "--key", "yaahc_wrongkey", "--email", "dev@example.com",
-		"--machine", "laptop-1")
-	if err == nil {
-		t.Fatal("expected a non-nil error for a rejected key")
-	}
-	if !strings.Contains(err.Error(), "rejected") {
-		t.Errorf("error = %q, want a 'rejected' hint", err.Error())
-	}
-	store, _ := config.NewFileStore()
-	if _, err := store.Load(); err == nil {
-		t.Error("config should not be written when login fails")
-	}
-}
-
-func TestLoginKeyFromStdin(t *testing.T) {
-	t.Setenv(config.EnvConfigDir, t.TempDir())
-	srv := fakeBackend(t)
-	defer srv.Close()
-	useLoginAPIURL(t, srv.URL)
-
-	root := newRootCmd()
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetErr(&bytes.Buffer{})
-	root.SetIn(strings.NewReader(testKey + "\n"))
-	root.SetArgs([]string{
-		"login", "--email", "dev@example.com", "--machine", "laptop-1",
-	})
-	if err := root.Execute(); err != nil {
-		t.Fatalf("login via stdin: %v", err)
-	}
-	store, _ := config.NewFileStore()
-	cfg, err := store.Load()
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if cfg.CollectorKey != testKey {
-		t.Errorf("key from stdin not persisted: %q", cfg.CollectorKey)
+// TestLoginHasNoPastedKeyOrEmailFlags proves the pasted-key/stdin path and
+// the local email prompt are gone: device flow is the only way to log in,
+// and the reporting email always comes from the server.
+func TestLoginHasNoPastedKeyOrEmailFlags(t *testing.T) {
+	cmd := newLoginCmd()
+	for _, name := range []string{"key", "email", "device"} {
+		if flag := cmd.Flags().Lookup(name); flag != nil {
+			t.Errorf("login must not expose --%s", name)
+		}
 	}
 }
 
@@ -183,6 +109,10 @@ type deviceMock struct {
 	polls              int
 	outcome            string // "approved" (default), "denied", "expired"
 	issuedKey          string
+	// userEmail is sent as the token response's user_email. omitUserEmail
+	// simulates an older API that predates the field.
+	userEmail     string
+	omitUserEmail bool
 }
 
 func (m *deviceMock) server(t *testing.T) *httptest.Server {
@@ -236,9 +166,13 @@ func (m *deviceMock) handleToken(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "expired_token"})
 	default:
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		resp := map[string]any{
 			"collector_key": m.issuedKey, "key_id": 1, "key_expires_at": "2026-10-09T00:00:00Z",
-		})
+		}
+		if !m.omitUserEmail {
+			resp["user_email"] = m.userEmail
+		}
+		_ = json.NewEncoder(w).Encode(resp)
 	}
 }
 
@@ -265,12 +199,13 @@ func TestDeviceLoginHappyPath(t *testing.T) {
 	t.Setenv(config.EnvConfigDir, t.TempDir())
 	noSleep(t)
 	openedURL := noOpenURL(t)
-	mock := &deviceMock{pollsBeforeResolve: 2, issuedKey: "abd_devicekey123456"}
+	mock := &deviceMock{
+		pollsBeforeResolve: 2, issuedKey: "abd_devicekey123456", userEmail: "dev@example.com",
+	}
 	srv := mock.server(t)
 	useLoginAPIURL(t, srv.URL)
 
-	out, err := runCmd(t,
-		"login", "--device", "--email", "dev@example.com", "--machine", "laptop-1")
+	out, err := runCmd(t, "login", "--machine", "laptop-1")
 	if err != nil {
 		t.Fatalf("device login: %v", err)
 	}
@@ -292,11 +227,32 @@ func TestDeviceLoginHappyPath(t *testing.T) {
 	if cfg.CollectorID != 42 {
 		t.Errorf("collector_id = %d, want 42", cfg.CollectorID)
 	}
+	if cfg.UserEmail != mock.userEmail {
+		t.Errorf("user_email = %q, want %q (must come from the token response)", cfg.UserEmail, mock.userEmail)
+	}
 	if cfg.KeyExpiresAt != "2026-10-09T00:00:00Z" {
 		t.Errorf("key_expires_at = %q, want 2026-10-09T00:00:00Z", cfg.KeyExpiresAt)
 	}
 	if mock.polls <= mock.pollsBeforeResolve {
 		t.Errorf("polls = %d, want more than %d (pending then approved)", mock.polls, mock.pollsBeforeResolve)
+	}
+}
+
+func TestDeviceLoginMissingUserEmailFails(t *testing.T) {
+	t.Setenv(config.EnvConfigDir, t.TempDir())
+	noSleep(t)
+	noOpenURL(t)
+	mock := &deviceMock{issuedKey: "abd_devicekey123456", omitUserEmail: true}
+	srv := mock.server(t)
+	useLoginAPIURL(t, srv.URL)
+
+	_, err := runCmd(t, "login", "--machine", "laptop-1")
+	if err == nil || !strings.Contains(err.Error(), "reporting email") {
+		t.Fatalf("error = %v, want a reporting-email hint", err)
+	}
+	store, _ := config.NewFileStore()
+	if _, err := store.Load(); err == nil {
+		t.Error("config should not be written when the token response has no user_email")
 	}
 }
 
@@ -308,8 +264,7 @@ func TestDeviceLoginDenied(t *testing.T) {
 	srv := mock.server(t)
 	useLoginAPIURL(t, srv.URL)
 
-	_, err := runCmd(t,
-		"login", "--device", "--email", "dev@example.com", "--machine", "laptop-1")
+	_, err := runCmd(t, "login", "--machine", "laptop-1")
 	if err == nil || !strings.Contains(err.Error(), "denied") {
 		t.Fatalf("error = %v, want a denial message", err)
 	}
@@ -327,22 +282,13 @@ func TestDeviceLoginExpired(t *testing.T) {
 	srv := mock.server(t)
 	useLoginAPIURL(t, srv.URL)
 
-	_, err := runCmd(t,
-		"login", "--device", "--email", "dev@example.com", "--machine", "laptop-1")
+	_, err := runCmd(t, "login", "--machine", "laptop-1")
 	if err == nil || !strings.Contains(err.Error(), "expired") {
 		t.Fatalf("error = %v, want an expiry message", err)
 	}
 	store, _ := config.NewFileStore()
 	if _, err := store.Load(); err == nil {
 		t.Error("config should not be written when the device code expires")
-	}
-}
-
-func TestDeviceLoginKeyAndDeviceMutuallyExclusive(t *testing.T) {
-	t.Setenv(config.EnvConfigDir, t.TempDir())
-	_, err := runCmd(t, "login", "--key", testKey, "--device")
-	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
-		t.Fatalf("error = %v, want a mutually-exclusive message", err)
 	}
 }
 
@@ -361,9 +307,7 @@ func TestDeviceLoginCtrlCSafe(t *testing.T) {
 	root := newRootCmd()
 	root.SetOut(&bytes.Buffer{})
 	root.SetErr(&bytes.Buffer{})
-	root.SetArgs([]string{
-		"login", "--device", "--email", "dev@example.com", "--machine", "laptop-1",
-	})
+	root.SetArgs([]string{"login", "--machine", "laptop-1"})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled: simulates Ctrl-C landing before/at the start of the poll
 	err := root.ExecuteContext(ctx)
