@@ -75,3 +75,47 @@ func TestSendTestSendsConfiguredToken(t *testing.T) {
 		t.Errorf("token header = %q, want %q", gotToken, token)
 	}
 }
+
+// saveReceiverPort persists port as the receiver_port serve last recorded.
+func saveReceiverPort(t *testing.T, port int) {
+	t.Helper()
+	store, err := config.NewFileStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(&config.Config{ReceiverPort: port}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSendTestUsesConfiguredPortWhenFlagUnset covers #80: without --port,
+// send-test must probe the persisted receiver_port, not the 8765 default.
+func TestSendTestUsesConfiguredPortWhenFlagUnset(t *testing.T) {
+	t.Setenv(config.EnvConfigDir, t.TempDir())
+	srv, queued := fakeReceiver()
+	defer srv.Close()
+	saveReceiverPort(t, serverPort(t, srv))
+
+	if _, err := runCmd(t, "send-test"); err != nil {
+		t.Fatalf("send-test: %v", err)
+	}
+	if *queued != 1 {
+		t.Errorf("queued counter = %d, want 1", *queued)
+	}
+}
+
+func TestSendTestExplicitPortOverridesConfigured(t *testing.T) {
+	t.Setenv(config.EnvConfigDir, t.TempDir())
+	closed, _ := fakeReceiver()
+	saveReceiverPort(t, serverPort(t, closed))
+	closed.Close()
+	srv, queued := fakeReceiver()
+	defer srv.Close()
+
+	if _, err := runCmd(t, "send-test", "--port", strconv.Itoa(serverPort(t, srv))); err != nil {
+		t.Fatalf("send-test: %v", err)
+	}
+	if *queued != 1 {
+		t.Errorf("queued counter = %d, want 1", *queued)
+	}
+}

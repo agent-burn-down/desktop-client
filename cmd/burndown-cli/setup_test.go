@@ -177,3 +177,21 @@ func TestSetupNotDetectedIsHonest(t *testing.T) {
 		t.Errorf("expected honest 'not detected' output, got: %q", out)
 	}
 }
+
+// TestSetupTargetsPersistedReceiverPort proves setup points agents at the
+// port serve persisted rather than the 8765 flag default (#80).
+func TestSetupTargetsPersistedReceiverPort(t *testing.T) {
+	claudeDir, _ := setupDirs(t)
+	saveReceiverPort(t, 8766)
+
+	if _, err := runCmd(t, "setup", "--claude", "--yes"); err != nil {
+		t.Fatalf("setup apply: %v", err)
+	}
+	settings, err := os.ReadFile(filepath.Join(claudeDir, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(settings), "localhost:8766") {
+		t.Errorf("settings.json does not target the persisted port 8766: %s", settings)
+	}
+}

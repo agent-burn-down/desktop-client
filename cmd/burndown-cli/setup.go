@@ -111,7 +111,7 @@ func gatherPlans(cmd *cobra.Command, f *setupFlags) ([]agentPlan, error) {
 	if err != nil {
 		return nil, err
 	}
-	return buildPlans(t, f.port, token)
+	return buildPlans(t, resolvePort(cmd, f.port), token)
 }
 
 // resolveTargets runs detection and applies the force flags to decide which

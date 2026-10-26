@@ -6,7 +6,7 @@ import (
 	"github.com/agent-burn-down/desktop-client/internal/credstore"
 )
 
-// resolvePort picks the receiver port doctor/status should probe: an
+// resolvePort picks the receiver port a command should target: an
 // explicit --port flag wins, then the port `serve` last persisted to
 // config.json, then flagPort (already defaulted to receiver.DefaultPort by
 // the flag registration).

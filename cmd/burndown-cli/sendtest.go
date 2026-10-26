@@ -23,7 +23,7 @@ func newSendTestCmd() *cobra.Command {
 		Short: "Post a synthetic OTLP log to the local receiver and confirm it queued",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runSendTest(cmd, port)
+			return runSendTest(cmd, resolvePort(cmd, port))
 		},
 	}
 	cmd.Flags().IntVar(&port, "port", receiver.DefaultPort, "loopback port of the OTLP receiver")
