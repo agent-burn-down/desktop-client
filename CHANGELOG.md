@@ -4,6 +4,11 @@ All notable changes to `burndown-cli` are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- Releases publish from CI: pushing a `v*` tag runs `make test` and then
+  goreleaser in `.github/workflows/release.yml` (#83).
+
 ## [0.9.0] - 2026-08-08
 
 ### Added
